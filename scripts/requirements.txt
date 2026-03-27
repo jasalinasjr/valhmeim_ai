@@ -1,0 +1,23 @@
+# Core RL + PyTorch (stable-baselines3 pulls torch automatically)
+stable-baselines3==2.7.1          # Latest stable as of late 2025; avoids pre-releases
+gymnasium==1.0.0                  # Modern Gym successor (used by SB3)
+
+# Computer vision & screen capture
+opencv-python==4.11.0.86          # cv2
+mss==10.0.0                       # Fast screen capture
+
+# GPU monitoring (NVIDIA)
+pynvml==13.0.1                    # Latest stable
+
+# Input simulation (Windows DirectInput)
+pydirectinput==1.0.4              # Last official release; works well for games
+
+# Optional but used/imported in original code
+ultralytics==8.4.22               # YOLOv11 support + latest stable
+
+# Utilities / better experience
+numpy==2.2.0                      # Recent but stable
+torchvision==0.20.0               # Often useful with SB3 + CNN policies (matches torch from SB3)
+
+# Optional extras for better debugging / logging / viz
+tensorboard==2.18.0               # For SB3 tensorboard_log (highly recommended)
