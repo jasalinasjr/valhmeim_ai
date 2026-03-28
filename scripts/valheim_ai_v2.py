@@ -25,10 +25,8 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 TEMP_THRESHOLD = 82
 VRAM_RESERVE = 450
 MAX_BURST_STEPS = 2000
+MOUSE_SENSITIVITY = 28
 
-MOUSE_SENSITIVITY = 28   # Good starting value for 1280x960
-
-# Simple reward weights
 REWARD_WEIGHTS = {
     "time_penalty": -0.01,
     "wood_bonus": 2.0,
@@ -88,7 +86,6 @@ def find_valheim_window():
     return None
 
 
-# ─── VALHEIM ENVIRONMENT ────────────────────────────────────────────────────────
 class ValheimSimpleEnv(gym.Env):
     def __init__(self, image_size=(84, 84)):
         super().__init__()
@@ -100,7 +97,6 @@ class ValheimSimpleEnv(gym.Env):
         self.last_preprocessed = None
         self.last_detections = Counter()
 
-        # 16 actions: 0-7 movement, 8-11 mouse look
         self.action_space = spaces.Discrete(16)
 
         self.observation_space = spaces.Box(
@@ -152,18 +148,15 @@ class ValheimSimpleEnv(gym.Env):
     def _compute_reward(self, current_detections: Counter) -> float:
         reward = REWARD_WEIGHTS["time_penalty"]
 
-        # Positive reward for resources
         for item in ["wood", "berry", "log", "pinecone", "resin"]:
             delta = current_detections[item] - self.last_detections.get(item, 0)
             if delta > 0:
                 reward += REWARD_WEIGHTS["wood_bonus"] * delta
 
-        # Penalty for seeing enemies
         for enemy in ["greydwarf", "troll", "wolf", "skeleton", "enemy"]:
             if enemy in current_detections:
                 reward += REWARD_WEIGHTS["enemy_penalty"]
 
-        # Curiosity reward (encourages exploration)
         if self.last_preprocessed is not None:
             diff = np.abs(current_preprocessed.astype(np.float32) - self.last_preprocessed.astype(np.float32))
             curiosity = np.mean(diff) / 255.0
@@ -191,11 +184,9 @@ class ValheimSimpleEnv(gym.Env):
     def step(self, action):
         self.current_step += 1
 
-        # Action Map
         action_map = {
             0: ("w", 0.25), 1: ("s", 0.25), 2: ("a", 0.25), 3: ("d", 0.25),
             4: ("space", 0.15), 5: ("left", 0.3), 6: ("e", 0.2), 7: (None, 0.1),
-            # Mouse look actions - very important for looking down at ground
             8:  ("mouse_left",  MOUSE_SENSITIVITY),
             9:  ("mouse_right", MOUSE_SENSITIVITY),
             10: ("mouse_up",    MOUSE_SENSITIVITY),
@@ -289,7 +280,7 @@ def main():
 
         env = ValheimSimpleEnv(image_size=(84, 84))
         vec_env = DummyVecEnv([lambda: env])
-        vec_env = VecFrameStack(vec_env, n_stack=4)
+        vec_env = VecFrameStack(vec_env, n_stack=4)   # Frame stacking
 
         try:
             if os.path.exists(f"{MODEL_SAVE}.zip"):
