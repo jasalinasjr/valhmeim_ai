@@ -14,7 +14,7 @@ from pynvml import *
 from gymnasium import spaces
 import gymnasium as gym
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack
+from stable_baselines3.common.vec_env import DummyVecEnv
 
 # ─── CONFIGURATION ──────────────────────────────────────────────────────────────
 VALHEIM_WINDOW_TITLE = "Valheim"
@@ -98,7 +98,8 @@ class ValheimSimpleEnv(gym.Env):
         self.last_preprocessed = None
         self.last_detections = Counter()
 
-        self.action_space = spaces.Discrete(15)
+        # 24 actions as per your request
+        self.action_space = spaces.Discrete(24)
 
         self.observation_space = spaces.Box(
             low=0, high=255,
@@ -196,11 +197,20 @@ class ValheimSimpleEnv(gym.Env):
             7: ("e", 0.2),       # interact
             8: ("shift", 0.15),  # sprint
             9: ("tab", 0.05),    # inventory
-            10: (None, 0.1),     # idle
-            11: ("mouse_left",  MOUSE_SENSITIVITY),
-            12: ("mouse_right", MOUSE_SENSITIVITY),
-            13: ("mouse_up",    MOUSE_SENSITIVITY),
-            14: ("mouse_down",  MOUSE_SENSITIVITY),
+            10: ("x", 0.05),     # sit
+            11: ("1", 0.15),     # hotbar 1
+            12: ("2", 0.15),     # hotbar 2
+            13: ("3", 0.15),     # hotbar 3
+            14: ("4", 0.15),     # hotbar 4
+            15: ("5", 0.15),     # hotbar 5
+            16: ("6", 0.15),     # hotbar 6
+            17: ("7", 0.15),     # hotbar 7
+            18: ("8", 0.15),     # hotbar 8
+            19: (None, 0.1),     # idle
+            20: ("mouse_left",  MOUSE_SENSITIVITY),
+            21: ("mouse_right", MOUSE_SENSITIVITY),
+            22: ("mouse_up",    MOUSE_SENSITIVITY),
+            23: ("mouse_down",  MOUSE_SENSITIVITY),
         }
 
         act = action_map.get(action, (None, 0.1))
@@ -240,6 +250,7 @@ class ValheimSimpleEnv(gym.Env):
         else:
             action_name = "IDLE"
 
+        # Action debug every 50 steps
         if self.current_step % 50 == 0:
             logger.info(f"Step {self.current_step:4d} | Action: {action} → {action_name}")
 
@@ -297,7 +308,7 @@ def main():
 
     total_timesteps = 0
 
-    # === YOLO Debug Block ===
+    # YOLO Debug Block
     if YOLO_MODEL_PATH and os.path.exists(YOLO_MODEL_PATH):
         try:
             from ultralytics import YOLO
@@ -313,7 +324,6 @@ def main():
             del temp_model
         except Exception as e:
             logger.warning(f"Could not load YOLO for debug: {e}")
-    # ========================
 
     while running:
         temp, used_vram, free_vram = get_gpu_status()
@@ -326,7 +336,6 @@ def main():
 
         env = ValheimSimpleEnv(image_size=(84, 84))
         vec_env = DummyVecEnv([lambda: env])
-        vec_env = VecFrameStack(vec_env, n_stack=4)   # Frame stacking enabled
 
         try:
             model_path = f"{MODEL_SAVE}.zip"
@@ -357,9 +366,8 @@ def main():
 
         except Exception as e:
             logger.error(f"Training error: {e}")
-            # Auto-delete model on space mismatch so next run starts clean
             if ("spaces do not match" in str(e).lower()) and os.path.exists(f"{MODEL_SAVE}.zip"):
-                logger.info("Space mismatch detected. Deleting old model for fresh start...")
+                logger.info("Space mismatch detected. Deleting old model...")
                 os.remove(f"{MODEL_SAVE}.zip")
         finally:
             vec_env.close()
