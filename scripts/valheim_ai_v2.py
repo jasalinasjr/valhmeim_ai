@@ -14,7 +14,7 @@ from pynvml import *
 from gymnasium import spaces
 import gymnasium as gym
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack
+from stable_baselines3.common.vec_env import DummyVecEnv
 
 # ─── CONFIGURATION ──────────────────────────────────────────────────────────────
 VALHEIM_WINDOW_TITLE = "Valheim"
@@ -86,6 +86,7 @@ def find_valheim_window():
     return None
 
 
+# ─── VALHEIM ENVIRONMENT ────────────────────────────────────────────────────────
 class ValheimSimpleEnv(gym.Env):
     def __init__(self, image_size=(84, 84)):
         super().__init__()
@@ -97,6 +98,7 @@ class ValheimSimpleEnv(gym.Env):
         self.last_preprocessed = None
         self.last_detections = Counter()
 
+        # 16 actions: 0-7 movement, 8-11 mouse look
         self.action_space = spaces.Discrete(16)
 
         self.observation_space = spaces.Box(
@@ -185,8 +187,14 @@ class ValheimSimpleEnv(gym.Env):
         self.current_step += 1
 
         action_map = {
-            0: ("w", 0.25), 1: ("s", 0.25), 2: ("a", 0.25), 3: ("d", 0.25),
-            4: ("space", 0.15), 5: ("left", 0.3), 6: ("e", 0.2), 7: (None, 0.1),
+            0: ("w", 0.25),      # forward
+            1: ("s", 0.25),      # back
+            2: ("a", 0.25),      # strafe left
+            3: ("d", 0.25),      # strafe right
+            4: ("space", 0.15),  # jump
+            5: ("left", 0.3),    # attack
+            6: ("e", 0.2),       # interact
+            7: (None, 0.1),      # idle
             8:  ("mouse_left",  MOUSE_SENSITIVITY),
             9:  ("mouse_right", MOUSE_SENSITIVITY),
             10: ("mouse_up",    MOUSE_SENSITIVITY),
@@ -194,8 +202,11 @@ class ValheimSimpleEnv(gym.Env):
         }
 
         act = action_map.get(action, (None, 0.1))
+        action_name = "unknown"
+
         if act[0] is not None:
             if act[0] == "left":
+                action_name = "ATTACK"
                 pydirectinput.mouseDown(button="left")
                 time.sleep(act[1])
                 pydirectinput.mouseUp(button="left")
@@ -203,17 +214,28 @@ class ValheimSimpleEnv(gym.Env):
                 direction = act[0]
                 amount = act[1]
                 if direction == "mouse_left":
+                    action_name = "LOOK LEFT"
                     pydirectinput.moveRel(xOffset=-amount, yOffset=0)
                 elif direction == "mouse_right":
+                    action_name = "LOOK RIGHT"
                     pydirectinput.moveRel(xOffset=amount, yOffset=0)
                 elif direction == "mouse_up":
+                    action_name = "LOOK UP"
                     pydirectinput.moveRel(xOffset=0, yOffset=-amount)
                 elif direction == "mouse_down":
+                    action_name = "LOOK DOWN"
                     pydirectinput.moveRel(xOffset=0, yOffset=amount)
             else:
+                action_name = f"MOVE {act[0].upper()}"
                 pydirectinput.keyDown(act[0])
                 time.sleep(act[1])
                 pydirectinput.keyUp(act[0])
+        else:
+            action_name = "IDLE"
+
+        # Debug: Print action every 50 steps
+        if self.current_step % 50 == 0:
+            logger.info(f"Step {self.current_step:4d} | Action: {action} → {action_name}")
 
         obs = self._capture_screen()
         self.last_obs = obs
@@ -269,6 +291,24 @@ def main():
 
     total_timesteps = 0
 
+    # === YOLO Debug Block ===
+    if YOLO_MODEL_PATH and os.path.exists(YOLO_MODEL_PATH):
+        try:
+            from ultralytics import YOLO
+            temp_model = YOLO(YOLO_MODEL_PATH)
+            print("\n" + "="*60)
+            print("YOLO MODEL DEBUG INFORMATION")
+            print("="*60)
+            print("Detected classes:")
+            for idx, name in temp_model.names.items():
+                print(f"  {idx:2d}: {name}")
+            print(f"Total classes: {len(temp_model.names)}")
+            print("="*60 + "\n")
+            del temp_model
+        except Exception as e:
+            logger.warning(f"Could not load YOLO for debug: {e}")
+    # ========================
+
     while running:
         temp, used_vram, free_vram = get_gpu_status()
         logger.info(f"GPU | Temp: {temp}°C | Used: {used_vram}MB | Free: {free_vram}MB")
@@ -280,7 +320,6 @@ def main():
 
         env = ValheimSimpleEnv(image_size=(84, 84))
         vec_env = DummyVecEnv([lambda: env])
-        vec_env = VecFrameStack(vec_env, n_stack=4)   # Frame stacking
 
         try:
             if os.path.exists(f"{MODEL_SAVE}.zip"):
