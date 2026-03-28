@@ -19,7 +19,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack
 # ─── CONFIGURATION ──────────────────────────────────────────────────────────────
 VALHEIM_WINDOW_TITLE = "Valheim"
 MODEL_SAVE = "valheim_ppo"
-YOLO_MODEL_PATH = "valheim_custom_v3.pt"           # Set to None to disable YOLO
+YOLO_MODEL_PATH = "valheim_custom_v3.pt"
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 TEMP_THRESHOLD = 82
@@ -86,7 +86,6 @@ def find_valheim_window():
     return None
 
 
-# ─── VALHEIM ENVIRONMENT ────────────────────────────────────────────────────────
 class ValheimSimpleEnv(gym.Env):
     def __init__(self, image_size=(84, 84)):
         super().__init__()
@@ -270,7 +269,7 @@ def main():
 
     total_timesteps = 0
 
-    # === YOLO Debug Block - Shows what classes the model can detect ===
+    # === YOLO Debug Block ===
     if YOLO_MODEL_PATH and os.path.exists(YOLO_MODEL_PATH):
         try:
             from ultralytics import YOLO
@@ -286,7 +285,7 @@ def main():
             del temp_model
         except Exception as e:
             logger.warning(f"Could not load YOLO for debug: {e}")
-    # =================================================================
+    # ========================
 
     while running:
         temp, used_vram, free_vram = get_gpu_status()
@@ -299,14 +298,14 @@ def main():
 
         env = ValheimSimpleEnv(image_size=(84, 84))
         vec_env = DummyVecEnv([lambda: env])
-        vec_env = VecFrameStack(vec_env, n_stack=4)
+        vec_env = VecFrameStack(vec_env, n_stack=4)        # Apply stacking FIRST
 
         try:
             if os.path.exists(f"{MODEL_SAVE}.zip"):
-                logger.info(f"Loading model {MODEL_SAVE}")
+                logger.info(f"Loading model {MODEL_SAVE} with frame stacking")
                 model = PPO.load(MODEL_SAVE, env=vec_env, device=DEVICE)
             else:
-                logger.info("Creating new PPO model")
+                logger.info("Creating new PPO model with frame stacking")
                 model = PPO(
                     "CnnPolicy",
                     vec_env,
@@ -329,6 +328,10 @@ def main():
 
         except Exception as e:
             logger.error(f"Training error: {e}")
+            # Optional: Delete corrupted model so next run starts fresh
+            if os.path.exists(f"{MODEL_SAVE}.zip"):
+                logger.info("Deleting corrupted model file to allow fresh start on next run")
+                os.remove(f"{MODEL_SAVE}.zip")
         finally:
             vec_env.close()
             env.close()
