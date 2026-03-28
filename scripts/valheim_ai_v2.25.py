@@ -19,23 +19,19 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack
 # ─── CONFIGURATION ──────────────────────────────────────────────────────────────
 VALHEIM_WINDOW_TITLE = "Valheim"
 MODEL_SAVE = "valheim_ppo"
-YOLO_MODEL_PATH = "valheim_custom_v3.pt"           # Set to None to disable
+YOLO_MODEL_PATH = "valheim_custom_v3.pt"
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 TEMP_THRESHOLD = 82
 VRAM_RESERVE = 450
 MAX_BURST_STEPS = 2000
-
-MOUSE_SENSITIVITY = 28   # Slightly lower for 1280x960 resolution
+MOUSE_SENSITIVITY = 28
 
 REWARD_WEIGHTS = {
     "time_penalty": -0.01,
     "wood_bonus": 2.0,
-    "kill_bonus": 5.0,
-    "health_bonus": 3.0,
-    "curiosity_scale": 0.5,
-    "logout_penalty": -50.0,
-    "empty_inventory_penalty": -0.8
+    "enemy_penalty": -2.0,
+    "curiosity_scale": 0.5
 }
 
 logging.basicConfig(
@@ -101,10 +97,9 @@ class ValheimSimpleEnv(gym.Env):
         self.last_obs = None
         self.last_preprocessed = None
         self.last_detections = Counter()
-        self.last_health_proxy = 0.0
-        self.last_red_pixel_ratio = 0.0
 
-        self.action_space = spaces.Discrete(16)
+        # Action Space: 15 actions (0-14) as requested
+        self.action_space = spaces.Discrete(15)
 
         self.observation_space = spaces.Box(
             low=0, high=255,
@@ -129,7 +124,7 @@ class ValheimSimpleEnv(gym.Env):
         if region:
             self.capture_region = region
         elif not self.capture_region:
-            self.capture_region = {"top": 40, "left": 0, "width": 1280, "height": 920}
+            self.capture_region = {"top": 40, "left": 0, "width": 1280, "height": 880}
 
     def _capture_screen(self):
         if not self.capture_region:
@@ -142,39 +137,6 @@ class ValheimSimpleEnv(gym.Env):
     def _preprocess(self, img):
         return cv2.resize(img, self.image_size, interpolation=cv2.INTER_AREA)
 
-    def _health_proxy(self, img: np.ndarray) -> float:
-        """Health proxy tuned for 1280x960 resolution (area 6 - bottom left red bar)"""
-        try:
-            h, w = img.shape[:2]
-            # Tighter region for 1280x960
-            y_start = max(0, h - 130)
-            y_end   = max(0, h - 40)
-            x_start = 15
-            x_end   = min(w, 160)
-
-            health_region = img[y_start:y_end, x_start:x_end]
-            if health_region.size == 0:
-                return 0.5
-
-            hsv = cv2.cvtColor(health_region, cv2.COLOR_RGB2HSV)
-            mask1 = cv2.inRange(hsv, np.array([0, 80, 80]),   np.array([15, 255, 255]))
-            mask2 = cv2.inRange(hsv, np.array([165, 80, 80]), np.array([180, 255, 255]))
-            red_mask = cv2.bitwise_or(mask1, mask2)
-
-            red_ratio = np.sum(red_mask > 0) / red_mask.size
-
-            if np.mean(health_region) < 40:
-                return max(0.05, red_ratio * 0.6)
-
-            return float(np.clip(red_ratio, 0.05, 1.0))
-        except:
-            return 0.5
-
-    def _is_logout_or_quit(self, current_red_ratio: float) -> bool:
-        if current_red_ratio < 0.08 and self.last_red_pixel_ratio > 0.25:
-            return True
-        return False
-
     def _get_detections(self, img):
         if not self.yolo:
             return Counter()
@@ -185,36 +147,17 @@ class ValheimSimpleEnv(gym.Env):
         except:
             return Counter()
 
-    def _is_inventory_empty(self, detections: Counter) -> bool:
-        common_items = {"wood", "stone", "axe", "hammer", "berry", "meat", "log", "resin", "torch", "pickaxe"}
-        detected = {k.lower() for k in detections.keys()}
-        return len(common_items & detected) == 0
-
-    def _compute_reward(self, current_detections: Counter, current_health: float, current_red_ratio: float) -> float:
+    def _compute_reward(self, current_detections: Counter) -> float:
         reward = REWARD_WEIGHTS["time_penalty"]
 
         for item in ["wood", "berry", "log", "pinecone", "resin"]:
-            delta = current_detections[item] - self.last_detections[item]
+            delta = current_detections[item] - self.last_detections.get(item, 0)
             if delta > 0:
                 reward += REWARD_WEIGHTS["wood_bonus"] * delta
 
         for enemy in ["greydwarf", "troll", "wolf", "skeleton", "enemy"]:
-            delta = self.last_detections[enemy] - current_detections[enemy]
-            if delta > 0:
-                reward += REWARD_WEIGHTS["kill_bonus"] * delta
-
-        health_delta = current_health - self.last_health_proxy
-        if health_delta > 0.08:
-            reward += REWARD_WEIGHTS["health_bonus"] * 1.5
-        elif health_delta < -0.08:
-            reward -= 1.5
-
-        if self._is_logout_or_quit(current_red_ratio):
-            reward += REWARD_WEIGHTS["logout_penalty"]
-            logger.warning("Logout/Quit detected! Large penalty applied.")
-
-        if self._is_inventory_empty(current_detections):
-            reward += REWARD_WEIGHTS["empty_inventory_penalty"]
+            if enemy in current_detections:
+                reward += REWARD_WEIGHTS["enemy_penalty"]
 
         if self.last_preprocessed is not None:
             diff = np.abs(current_preprocessed.astype(np.float32) - self.last_preprocessed.astype(np.float32))
@@ -228,8 +171,6 @@ class ValheimSimpleEnv(gym.Env):
         self.current_step = 0
         self.episode_reward = 0.0
         self.last_detections = Counter()
-        self.last_health_proxy = 0.0
-        self.last_red_pixel_ratio = 0.0
         self._update_capture_region()
 
         pydirectinput.press('esc')
@@ -245,36 +186,66 @@ class ValheimSimpleEnv(gym.Env):
     def step(self, action):
         self.current_step += 1
 
+        # Your requested action map (cleaned, no duplicate keys)
         action_map = {
-            0: ("w", 0.25), 1: ("s", 0.25), 2: ("a", 0.25), 3: ("d", 0.25),
-            4: ("space", 0.15), 5: ("left", 0.3), 6: ("e", 0.2), 7: (None, 0.1),
-            8:  ("mouse_left",  MOUSE_SENSITIVITY),
-            9:  ("mouse_right", MOUSE_SENSITIVITY),
-            10: ("mouse_up",    MOUSE_SENSITIVITY),
-            11: ("mouse_down",  MOUSE_SENSITIVITY),
+            0: ("w", 0.25),      # forward
+            1: ("s", 0.25),      # back
+            2: ("a", 0.25),      # strafe left
+            3: ("d", 0.25),      # strafe right
+            4: ("space", 0.15),  # jump
+            5: ("left", 0.3),    # attack
+            6: ("right", 0.3),   # block
+            7: ("e", 0.2),       # interact
+            8: ("shift", 0.15),  # sprint
+            9: ("tab", 0.05),    # inventory
+            10: (None, 0.1),     # idle
+            # Mouse look actions (very important for looking down)
+            11: ("mouse_left",  MOUSE_SENSITIVITY),
+            12: ("mouse_right", MOUSE_SENSITIVITY),
+            13: ("mouse_up",    MOUSE_SENSITIVITY),
+            14: ("mouse_down",  MOUSE_SENSITIVITY),
         }
 
         act = action_map.get(action, (None, 0.1))
+        action_name = "unknown"
+
         if act[0] is not None:
             if act[0] == "left":
+                action_name = "ATTACK"
                 pydirectinput.mouseDown(button="left")
                 time.sleep(act[1])
                 pydirectinput.mouseUp(button="left")
+            elif act[0] == "right":
+                action_name = "BLOCK"
+                pydirectinput.mouseDown(button="right")
+                time.sleep(act[1])
+                pydirectinput.mouseUp(button="right")
             elif act[0].startswith("mouse_"):
                 direction = act[0]
                 amount = act[1]
                 if direction == "mouse_left":
+                    action_name = "LOOK LEFT"
                     pydirectinput.moveRel(xOffset=-amount, yOffset=0)
                 elif direction == "mouse_right":
+                    action_name = "LOOK RIGHT"
                     pydirectinput.moveRel(xOffset=amount, yOffset=0)
                 elif direction == "mouse_up":
+                    action_name = "LOOK UP"
                     pydirectinput.moveRel(xOffset=0, yOffset=-amount)
                 elif direction == "mouse_down":
+                    action_name = "LOOK DOWN"
                     pydirectinput.moveRel(xOffset=0, yOffset=amount)
             else:
+                action_name = f"{act[0].upper()}"
                 pydirectinput.keyDown(act[0])
                 time.sleep(act[1])
                 pydirectinput.keyUp(act[0])
+        else:
+            action_name = "IDLE"
+
+        # Action debug every 50 steps
+        if self.current_step % 50 == 0:
+            logger.info(f"Step {self.current_step:4d} | Action: {action} → {action_name}")
 
         obs = self._capture_screen()
         self.last_obs = obs
@@ -282,15 +253,11 @@ class ValheimSimpleEnv(gym.Env):
         current_preprocessed = processed.copy()
 
         current_detections = self._get_detections(obs)
-        current_health = self._health_proxy(obs)
-        current_red_ratio = current_health
 
-        reward = self._compute_reward(current_detections, current_health, current_red_ratio)
+        reward = self._compute_reward(current_detections)
         self.episode_reward += reward
 
         self.last_detections = current_detections
-        self.last_health_proxy = current_health
-        self.last_red_pixel_ratio = current_red_ratio
         self.last_preprocessed = current_preprocessed
 
         terminated = False
@@ -299,8 +266,7 @@ class ValheimSimpleEnv(gym.Env):
         info = {
             "episode_reward": self.episode_reward,
             "step": self.current_step,
-            "detections": dict(current_detections),
-            "health_proxy": current_health
+            "detections": dict(current_detections)
         }
 
         return processed, reward, terminated, truncated, info
@@ -316,7 +282,7 @@ class ValheimSimpleEnv(gym.Env):
         cv2.destroyAllWindows()
 
 
-# ─── MAIN TRAINING LOOP ─────────────────────────────────────────────────────────
+# ─── MAIN TRAINING LOOP (WITH FRAME STACKING) ───────────────────────────────────
 def main():
     running = True
 
@@ -335,6 +301,24 @@ def main():
 
     total_timesteps = 0
 
+    # === YOLO Debug Block ===
+    if YOLO_MODEL_PATH and os.path.exists(YOLO_MODEL_PATH):
+        try:
+            from ultralytics import YOLO
+            temp_model = YOLO(YOLO_MODEL_PATH)
+            print("\n" + "="*60)
+            print("YOLO MODEL DEBUG INFORMATION")
+            print("="*60)
+            print("Detected classes:")
+            for idx, name in temp_model.names.items():
+                print(f"  {idx:2d}: {name}")
+            print(f"Total classes: {len(temp_model.names)}")
+            print("="*60 + "\n")
+            del temp_model
+        except Exception as e:
+            logger.warning(f"Could not load YOLO for debug: {e}")
+    # ========================
+
     while running:
         temp, used_vram, free_vram = get_gpu_status()
         logger.info(f"GPU | Temp: {temp}°C | Used: {used_vram}MB | Free: {free_vram}MB")
@@ -346,7 +330,7 @@ def main():
 
         env = ValheimSimpleEnv(image_size=(84, 84))
         vec_env = DummyVecEnv([lambda: env])
-        vec_env = VecFrameStack(vec_env, n_stack=4)
+        vec_env = VecFrameStack(vec_env, n_stack=4)   # ← Frame stacking added back
 
         try:
             if os.path.exists(f"{MODEL_SAVE}.zip"):
@@ -376,6 +360,11 @@ def main():
 
         except Exception as e:
             logger.error(f"Training error: {e}")
+            # Auto-delete on mismatch so next run starts clean
+            if ("Observation spaces do not match" in str(e) or
+                "Action spaces do not match" in str(e)) and os.path.exists(f"{MODEL_SAVE}.zip"):
+                logger.info("Space mismatch detected. Deleting old model for fresh start...")
+                os.remove(f"{MODEL_SAVE}.zip")
         finally:
             vec_env.close()
             env.close()
