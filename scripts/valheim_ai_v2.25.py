@@ -98,7 +98,6 @@ class ValheimSimpleEnv(gym.Env):
         self.last_preprocessed = None
         self.last_detections = Counter()
 
-        # Action Space: 15 actions (0-14) as requested
         self.action_space = spaces.Discrete(15)
 
         self.observation_space = spaces.Box(
@@ -186,7 +185,6 @@ class ValheimSimpleEnv(gym.Env):
     def step(self, action):
         self.current_step += 1
 
-        # Your requested action map (cleaned, no duplicate keys)
         action_map = {
             0: ("w", 0.25),      # forward
             1: ("s", 0.25),      # back
@@ -199,7 +197,6 @@ class ValheimSimpleEnv(gym.Env):
             8: ("shift", 0.15),  # sprint
             9: ("tab", 0.05),    # inventory
             10: (None, 0.1),     # idle
-            # Mouse look actions (very important for looking down)
             11: ("mouse_left",  MOUSE_SENSITIVITY),
             12: ("mouse_right", MOUSE_SENSITIVITY),
             13: ("mouse_up",    MOUSE_SENSITIVITY),
@@ -243,7 +240,6 @@ class ValheimSimpleEnv(gym.Env):
         else:
             action_name = "IDLE"
 
-        # Action debug every 50 steps
         if self.current_step % 50 == 0:
             logger.info(f"Step {self.current_step:4d} | Action: {action} → {action_name}")
 
@@ -282,7 +278,7 @@ class ValheimSimpleEnv(gym.Env):
         cv2.destroyAllWindows()
 
 
-# ─── MAIN TRAINING LOOP (WITH FRAME STACKING) ───────────────────────────────────
+# ─── MAIN TRAINING LOOP ─────────────────────────────────────────────────────────
 def main():
     running = True
 
@@ -330,14 +326,15 @@ def main():
 
         env = ValheimSimpleEnv(image_size=(84, 84))
         vec_env = DummyVecEnv([lambda: env])
-        vec_env = VecFrameStack(vec_env, n_stack=4)   # ← Frame stacking added back
+        vec_env = VecFrameStack(vec_env, n_stack=4)   # Frame stacking enabled
 
         try:
-            if os.path.exists(f"{MODEL_SAVE}.zip"):
-                logger.info(f"Loading model {MODEL_SAVE}")
-                model = PPO.load(MODEL_SAVE, env=vec_env, device=DEVICE)
+            model_path = f"{MODEL_SAVE}.zip"
+            if os.path.exists(model_path):
+                logger.info(f"Loading existing model: {MODEL_SAVE}")
+                model = PPO.load(model_path, env=vec_env, device=DEVICE)
             else:
-                logger.info("Creating new PPO model")
+                logger.info("No saved model found. Creating new PPO model.")
                 model = PPO(
                     "CnnPolicy",
                     vec_env,
@@ -360,9 +357,8 @@ def main():
 
         except Exception as e:
             logger.error(f"Training error: {e}")
-            # Auto-delete on mismatch so next run starts clean
-            if ("Observation spaces do not match" in str(e) or
-                "Action spaces do not match" in str(e)) and os.path.exists(f"{MODEL_SAVE}.zip"):
+            # Auto-delete model on space mismatch so next run starts clean
+            if ("spaces do not match" in str(e).lower()) and os.path.exists(f"{MODEL_SAVE}.zip"):
                 logger.info("Space mismatch detected. Deleting old model for fresh start...")
                 os.remove(f"{MODEL_SAVE}.zip")
         finally:
