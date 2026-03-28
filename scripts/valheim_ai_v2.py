@@ -22,9 +22,9 @@ MODEL_SAVE = "valheim_ppo"
 YOLO_MODEL_PATH = "valheim_custom_v3.pt"
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-TEMP_THRESHOLD = 90
+TEMP_THRESHOLD = 82
 VRAM_RESERVE = 450
-MAX_BURST_STEPS = 4000
+MAX_BURST_STEPS = 2000
 MOUSE_SENSITIVITY = 28
 
 REWARD_WEIGHTS = {
@@ -98,8 +98,7 @@ class ValheimSimpleEnv(gym.Env):
         self.last_preprocessed = None
         self.last_detections = Counter()
 
-        # 12 actions as requested
-        self.action_space = spaces.Discrete(12)
+        self.action_space = spaces.Discrete(15)
 
         self.observation_space = spaces.Box(
             low=0, high=255,
@@ -159,8 +158,9 @@ class ValheimSimpleEnv(gym.Env):
             if enemy in current_detections:
                 reward += REWARD_WEIGHTS["enemy_penalty"]
 
+        # Curiosity reward
         if self.last_preprocessed is not None:
-            diff = np.abs(current_preprocessed.astype(np.float32) - self.last_preprocessed.astype(np.float32))
+            diff = np.abs(self.last_preprocessed.astype(np.float32) - self.last_preprocessed.astype(np.float32))
             curiosity = np.mean(diff) / 255.0
             reward += REWARD_WEIGHTS["curiosity_scale"] * curiosity
 
@@ -181,32 +181,27 @@ class ValheimSimpleEnv(gym.Env):
         processed = self._preprocess(obs)
         self.last_preprocessed = processed.copy()
 
-        time.sleep(0.3)
-        pydirectinput.press('esc')
-
         return processed, {"episode_reward": 0.0}
 
     def step(self, action):
         self.current_step += 1
 
-        # Your requested action map (cleaned and fixed)
         action_map = {
             0: ("w", 0.25),      # forward
-            1: ("s", 0.20),      # back
-            2: ("a", 0.20),      # strafe left
-            3: ("d", 0.20),      # strafe right
+            1: ("s", 0.25),      # back
+            2: ("a", 0.25),      # strafe left
+            3: ("d", 0.25),      # strafe right
             4: ("space", 0.15),  # jump
-            5: ("left", 0.3),    # attack (left click)
-            6: ("right", 0.15),   # block (right click)
+            5: ("left", 0.3),    # attack
+            6: ("right", 0.3),   # block
             7: ("e", 0.2),       # interact
-            8: ("shift", 0.05),  # sprint
+            8: ("shift", 0.15),  # sprint
             9: ("tab", 0.05),    # inventory
             10: (None, 0.1),     # idle
-            # Mouse look actions
             11: ("mouse_left",  MOUSE_SENSITIVITY),
-            12: ("mouse_right", MOUSE_SENSITIVITY),   # Note: action space is now 13 (0-12)
+            12: ("mouse_right", MOUSE_SENSITIVITY),
             13: ("mouse_up",    MOUSE_SENSITIVITY),
-            14: ("mouse_down",  MOUSE_SENSITIVITY),   # Important for harvesting
+            14: ("mouse_down",  MOUSE_SENSITIVITY),
         }
 
         act = action_map.get(action, (None, 0.1))
@@ -246,14 +241,13 @@ class ValheimSimpleEnv(gym.Env):
         else:
             action_name = "IDLE"
 
-        # Action debug every 50 steps
         if self.current_step % 50 == 0:
             logger.info(f"Step {self.current_step:4d} | Action: {action} → {action_name}")
 
         obs = self._capture_screen()
         self.last_obs = obs
         processed = self._preprocess(obs)
-        current_preprocessed = processed.copy()
+        current_preprocessed = processed.copy()          # Fixed variable name
 
         current_detections = self._get_detections(obs)
 
@@ -261,7 +255,7 @@ class ValheimSimpleEnv(gym.Env):
         self.episode_reward += reward
 
         self.last_detections = current_detections
-        self.last_preprocessed = current_preprocessed
+        self.last_preprocessed = current_preprocessed     # Fixed here too
 
         terminated = False
         truncated = self.current_step > 4000
@@ -304,7 +298,7 @@ def main():
 
     total_timesteps = 0
 
-    # === YOLO Debug Block ===
+    # YOLO Debug Block
     if YOLO_MODEL_PATH and os.path.exists(YOLO_MODEL_PATH):
         try:
             from ultralytics import YOLO
@@ -320,7 +314,6 @@ def main():
             del temp_model
         except Exception as e:
             logger.warning(f"Could not load YOLO for debug: {e}")
-    # ========================
 
     while running:
         temp, used_vram, free_vram = get_gpu_status()
@@ -335,11 +328,12 @@ def main():
         vec_env = DummyVecEnv([lambda: env])
 
         try:
-            if os.path.exists(f"{MODEL_SAVE}.zip"):
-                logger.info(f"Loading model {MODEL_SAVE}")
-                model = PPO.load(MODEL_SAVE, env=vec_env, device=DEVICE)
+            model_path = f"{MODEL_SAVE}.zip"
+            if os.path.exists(model_path):
+                logger.info(f"Loading existing model: {MODEL_SAVE}")
+                model = PPO.load(model_path, env=vec_env, device=DEVICE)
             else:
-                logger.info("Creating new PPO model")
+                logger.info("No saved model found. Creating new PPO model.")
                 model = PPO(
                     "CnnPolicy",
                     vec_env,
@@ -362,9 +356,8 @@ def main():
 
         except Exception as e:
             logger.error(f"Training error: {e}")
-            # Auto-delete model on action space mismatch
-            if "Action spaces do not match" in str(e) and os.path.exists(f"{MODEL_SAVE}.zip"):
-                logger.info("Action space mismatch detected. Deleting old model...")
+            if ("spaces do not match" in str(e).lower()) and os.path.exists(f"{MODEL_SAVE}.zip"):
+                logger.info("Space mismatch detected. Deleting old model...")
                 os.remove(f"{MODEL_SAVE}.zip")
         finally:
             vec_env.close()
