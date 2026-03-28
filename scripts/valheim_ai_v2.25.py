@@ -19,21 +19,23 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack
 # ─── CONFIGURATION ──────────────────────────────────────────────────────────────
 VALHEIM_WINDOW_TITLE = "Valheim"
 MODEL_SAVE = "valheim_ppo"
-YOLO_MODEL_PATH = "valheim_custom_v3.pt"           # Set to None to disable YOLO
+YOLO_MODEL_PATH = "valheim_custom_v3.pt"           # Set to None to disable
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 TEMP_THRESHOLD = 82
 VRAM_RESERVE = 450
 MAX_BURST_STEPS = 2000
 
-MOUSE_SENSITIVITY = 28   # Good starting value for 1280x960
+MOUSE_SENSITIVITY = 28   # Slightly lower for 1280x960 resolution
 
-# Simple reward weights
 REWARD_WEIGHTS = {
     "time_penalty": -0.01,
     "wood_bonus": 2.0,
-    "enemy_penalty": -2.0,
-    "curiosity_scale": 0.5
+    "kill_bonus": 5.0,
+    "health_bonus": 3.0,
+    "curiosity_scale": 0.5,
+    "logout_penalty": -50.0,
+    "empty_inventory_penalty": -0.8
 }
 
 logging.basicConfig(
@@ -99,8 +101,9 @@ class ValheimSimpleEnv(gym.Env):
         self.last_obs = None
         self.last_preprocessed = None
         self.last_detections = Counter()
+        self.last_health_proxy = 0.0
+        self.last_red_pixel_ratio = 0.0
 
-        # 16 actions: 0-7 movement, 8-11 mouse look
         self.action_space = spaces.Discrete(16)
 
         self.observation_space = spaces.Box(
@@ -126,7 +129,7 @@ class ValheimSimpleEnv(gym.Env):
         if region:
             self.capture_region = region
         elif not self.capture_region:
-            self.capture_region = {"top": 40, "left": 0, "width": 1280, "height": 880}
+            self.capture_region = {"top": 40, "left": 0, "width": 1280, "height": 920}
 
     def _capture_screen(self):
         if not self.capture_region:
@@ -139,6 +142,39 @@ class ValheimSimpleEnv(gym.Env):
     def _preprocess(self, img):
         return cv2.resize(img, self.image_size, interpolation=cv2.INTER_AREA)
 
+    def _health_proxy(self, img: np.ndarray) -> float:
+        """Health proxy tuned for 1280x960 resolution (area 6 - bottom left red bar)"""
+        try:
+            h, w = img.shape[:2]
+            # Tighter region for 1280x960
+            y_start = max(0, h - 130)
+            y_end   = max(0, h - 40)
+            x_start = 15
+            x_end   = min(w, 160)
+
+            health_region = img[y_start:y_end, x_start:x_end]
+            if health_region.size == 0:
+                return 0.5
+
+            hsv = cv2.cvtColor(health_region, cv2.COLOR_RGB2HSV)
+            mask1 = cv2.inRange(hsv, np.array([0, 80, 80]),   np.array([15, 255, 255]))
+            mask2 = cv2.inRange(hsv, np.array([165, 80, 80]), np.array([180, 255, 255]))
+            red_mask = cv2.bitwise_or(mask1, mask2)
+
+            red_ratio = np.sum(red_mask > 0) / red_mask.size
+
+            if np.mean(health_region) < 40:
+                return max(0.05, red_ratio * 0.6)
+
+            return float(np.clip(red_ratio, 0.05, 1.0))
+        except:
+            return 0.5
+
+    def _is_logout_or_quit(self, current_red_ratio: float) -> bool:
+        if current_red_ratio < 0.08 and self.last_red_pixel_ratio > 0.25:
+            return True
+        return False
+
     def _get_detections(self, img):
         if not self.yolo:
             return Counter()
@@ -149,21 +185,37 @@ class ValheimSimpleEnv(gym.Env):
         except:
             return Counter()
 
-    def _compute_reward(self, current_detections: Counter) -> float:
+    def _is_inventory_empty(self, detections: Counter) -> bool:
+        common_items = {"wood", "stone", "axe", "hammer", "berry", "meat", "log", "resin", "torch", "pickaxe"}
+        detected = {k.lower() for k in detections.keys()}
+        return len(common_items & detected) == 0
+
+    def _compute_reward(self, current_detections: Counter, current_health: float, current_red_ratio: float) -> float:
         reward = REWARD_WEIGHTS["time_penalty"]
 
-        # Positive reward for resources
         for item in ["wood", "berry", "log", "pinecone", "resin"]:
-            delta = current_detections[item] - self.last_detections.get(item, 0)
+            delta = current_detections[item] - self.last_detections[item]
             if delta > 0:
                 reward += REWARD_WEIGHTS["wood_bonus"] * delta
 
-        # Penalty for seeing enemies
         for enemy in ["greydwarf", "troll", "wolf", "skeleton", "enemy"]:
-            if enemy in current_detections:
-                reward += REWARD_WEIGHTS["enemy_penalty"]
+            delta = self.last_detections[enemy] - current_detections[enemy]
+            if delta > 0:
+                reward += REWARD_WEIGHTS["kill_bonus"] * delta
 
-        # Curiosity reward (encourages exploration)
+        health_delta = current_health - self.last_health_proxy
+        if health_delta > 0.08:
+            reward += REWARD_WEIGHTS["health_bonus"] * 1.5
+        elif health_delta < -0.08:
+            reward -= 1.5
+
+        if self._is_logout_or_quit(current_red_ratio):
+            reward += REWARD_WEIGHTS["logout_penalty"]
+            logger.warning("Logout/Quit detected! Large penalty applied.")
+
+        if self._is_inventory_empty(current_detections):
+            reward += REWARD_WEIGHTS["empty_inventory_penalty"]
+
         if self.last_preprocessed is not None:
             diff = np.abs(current_preprocessed.astype(np.float32) - self.last_preprocessed.astype(np.float32))
             curiosity = np.mean(diff) / 255.0
@@ -176,6 +228,8 @@ class ValheimSimpleEnv(gym.Env):
         self.current_step = 0
         self.episode_reward = 0.0
         self.last_detections = Counter()
+        self.last_health_proxy = 0.0
+        self.last_red_pixel_ratio = 0.0
         self._update_capture_region()
 
         pydirectinput.press('esc')
@@ -191,11 +245,9 @@ class ValheimSimpleEnv(gym.Env):
     def step(self, action):
         self.current_step += 1
 
-        # Action Map
         action_map = {
             0: ("w", 0.25), 1: ("s", 0.25), 2: ("a", 0.25), 3: ("d", 0.25),
             4: ("space", 0.15), 5: ("left", 0.3), 6: ("e", 0.2), 7: (None, 0.1),
-            # Mouse look actions - very important for looking down at ground
             8:  ("mouse_left",  MOUSE_SENSITIVITY),
             9:  ("mouse_right", MOUSE_SENSITIVITY),
             10: ("mouse_up",    MOUSE_SENSITIVITY),
@@ -230,11 +282,15 @@ class ValheimSimpleEnv(gym.Env):
         current_preprocessed = processed.copy()
 
         current_detections = self._get_detections(obs)
+        current_health = self._health_proxy(obs)
+        current_red_ratio = current_health
 
-        reward = self._compute_reward(current_detections)
+        reward = self._compute_reward(current_detections, current_health, current_red_ratio)
         self.episode_reward += reward
 
         self.last_detections = current_detections
+        self.last_health_proxy = current_health
+        self.last_red_pixel_ratio = current_red_ratio
         self.last_preprocessed = current_preprocessed
 
         terminated = False
@@ -243,7 +299,8 @@ class ValheimSimpleEnv(gym.Env):
         info = {
             "episode_reward": self.episode_reward,
             "step": self.current_step,
-            "detections": dict(current_detections)
+            "detections": dict(current_detections),
+            "health_proxy": current_health
         }
 
         return processed, reward, terminated, truncated, info
