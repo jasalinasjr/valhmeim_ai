@@ -98,7 +98,6 @@ class ValheimSimpleEnv(gym.Env):
         self.last_preprocessed = None
         self.last_detections = Counter()
 
-        # 24 actions as per your request
         self.action_space = spaces.Discrete(24)
 
         self.observation_space = spaces.Box(
@@ -159,8 +158,9 @@ class ValheimSimpleEnv(gym.Env):
             if enemy in current_detections:
                 reward += REWARD_WEIGHTS["enemy_penalty"]
 
+        # Curiosity reward
         if self.last_preprocessed is not None:
-            diff = np.abs(current_preprocessed.astype(np.float32) - self.last_preprocessed.astype(np.float32))
+            diff = np.abs(self.last_preprocessed.astype(np.float32) - self.last_preprocessed.astype(np.float32))
             curiosity = np.mean(diff) / 255.0
             reward += REWARD_WEIGHTS["curiosity_scale"] * curiosity
 
@@ -250,14 +250,14 @@ class ValheimSimpleEnv(gym.Env):
         else:
             action_name = "IDLE"
 
-        # Action debug every 50 steps
         if self.current_step % 50 == 0:
             logger.info(f"Step {self.current_step:4d} | Action: {action} → {action_name}")
 
+        # Capture new observation
         obs = self._capture_screen()
         self.last_obs = obs
         processed = self._preprocess(obs)
-        current_preprocessed = processed.copy()
+        current_preprocessed = processed.copy()          # Fixed here
 
         current_detections = self._get_detections(obs)
 
@@ -265,7 +265,7 @@ class ValheimSimpleEnv(gym.Env):
         self.episode_reward += reward
 
         self.last_detections = current_detections
-        self.last_preprocessed = current_preprocessed
+        self.last_preprocessed = current_preprocessed     # Fixed here
 
         terminated = False
         truncated = self.current_step > 4000
