@@ -22,11 +22,12 @@ MODEL_SAVE = "valheim_ppo"
 YOLO_MODEL_PATH = "valheim_custom_v3.pt"
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-TEMP_THRESHOLD = 89
+TEMP_THRESHOLD = 90
 VRAM_RESERVE = 450
 MAX_BURST_STEPS = 2000
 
-MOUSE_SENSITIVITY = 28
+# Adjusted for 1280x720 resolution
+MOUSE_SENSITIVITY = 25   # Slightly lower for lower resolution
 
 REWARD_WEIGHTS = {
     "time_penalty": -0.01,
@@ -104,7 +105,6 @@ class ValheimSimpleEnv(gym.Env):
         self.last_health_proxy = 0.0
         self.last_red_pixel_ratio = 0.0
 
-        # 16 actions: 0-7 movement, 8-11 mouse look
         self.action_space = spaces.Discrete(16)
 
         self.observation_space = spaces.Box(
@@ -130,8 +130,8 @@ class ValheimSimpleEnv(gym.Env):
         if region:
             self.capture_region = region
         elif not self.capture_region:
-            monitor = self.sct.monitors[1]
-            self.capture_region = {"top": 40, "left": 0, "width": monitor["width"], "height": monitor["height"] - 80}
+            # Fallback optimized for 1280x720
+            self.capture_region = {"top": 30, "left": 0, "width": 1280, "height": 690}
 
     def _capture_screen(self):
         if not self.capture_region:
@@ -145,29 +145,32 @@ class ValheimSimpleEnv(gym.Env):
         return cv2.resize(img, self.image_size, interpolation=cv2.INTER_AREA)
 
     def _health_proxy(self, img: np.ndarray) -> float:
-        """Health proxy targeting area 6 (bottom-left red health bar)"""
-        h, w = img.shape[:2]
-        # Refined coordinates based on screenshot (area 6)
-        y_start = max(0, h - 140)
-        y_end   = max(0, h - 35)
-        x_start = 20
-        x_end   = min(w, 180)
-        
-        health_region = img[y_start:y_end, x_start:x_end]
-        if health_region.size == 0:
-            return 0.5
-        
-        hsv = cv2.cvtColor(health_region, cv2.COLOR_RGB2HSV)
-        mask1 = cv2.inRange(hsv, np.array([0, 80, 80]),   np.array([15, 255, 255]))
-        mask2 = cv2.inRange(hsv, np.array([165, 80, 80]), np.array([180, 255, 255]))
-        red_mask = cv2.bitwise_or(mask1, mask2)
-        
-        red_ratio = np.sum(red_mask > 0) / red_mask.size
-        
-        if np.mean(health_region) < 40:
-            return max(0.05, red_ratio * 0.6)
-        
-        return float(np.clip(red_ratio, 0.05, 1.0))
+        """Health proxy tuned for 1280x720 resolution (bottom-left health bar - area 6)"""
+        try:
+            h, w = img.shape[:2]
+            # Tuned coordinates for 1280x720
+            y_start = max(0, h - 125)
+            y_end   = max(0, h - 45)
+            x_start = 15
+            x_end   = min(w, 160)
+
+            health_region = img[y_start:y_end, x_start:x_end]
+            if health_region.size == 0:
+                return 0.5
+
+            hsv = cv2.cvtColor(health_region, cv2.COLOR_RGB2HSV)
+            mask1 = cv2.inRange(hsv, np.array([0, 80, 80]),   np.array([15, 255, 255]))
+            mask2 = cv2.inRange(hsv, np.array([165, 80, 80]), np.array([180, 255, 255]))
+            red_mask = cv2.bitwise_or(mask1, mask2)
+
+            red_ratio = np.sum(red_mask > 0) / red_mask.size
+
+            if np.mean(health_region) < 40:
+                return max(0.05, red_ratio * 0.6)
+
+            return float(np.clip(red_ratio, 0.05, 1.0))
+        except Exception:
+            return 0.5  # Safe fallback
 
     def _is_logout_or_quit(self, current_red_ratio: float) -> bool:
         if current_red_ratio < 0.08 and self.last_red_pixel_ratio > 0.25:
@@ -185,7 +188,6 @@ class ValheimSimpleEnv(gym.Env):
             return Counter()
 
     def _is_inventory_empty(self, detections: Counter) -> bool:
-        """Improved using hotbar (area 1)"""
         common_items = {"wood", "stone", "axe", "hammer", "berry", "meat", "log", "resin", "torch", "pickaxe"}
         detected = {k.lower() for k in detections.keys()}
         return len(common_items & detected) == 0
@@ -193,35 +195,29 @@ class ValheimSimpleEnv(gym.Env):
     def _compute_reward(self, current_detections: Counter, current_health: float, current_red_ratio: float) -> float:
         reward = REWARD_WEIGHTS["time_penalty"]
 
-        # Resource collection (hotbar / ground items)
         for item in ["wood", "berry", "log", "pinecone", "resin"]:
             delta = current_detections[item] - self.last_detections[item]
             if delta > 0:
                 reward += REWARD_WEIGHTS["wood_bonus"] * delta
 
-        # Kill bonuses
-        for enemy in ["greyling", "boar", "greydwarf", "troll", "wolf", "skeleton", "enemy"]:
+        for enemy in ["greyling", "boar","greydwarf", "troll", "wolf", "skeleton", "enemy"]:
             delta = self.last_detections[enemy] - current_detections[enemy]
             if delta > 0:
                 reward += REWARD_WEIGHTS["kill_bonus"] * delta
 
-        # Health change
         health_delta = current_health - self.last_health_proxy
         if health_delta > 0.08:
             reward += REWARD_WEIGHTS["health_bonus"] * 1.5
         elif health_delta < -0.08:
             reward -= 1.5
 
-        # Logout / Quit penalty
         if self._is_logout_or_quit(current_red_ratio):
             reward += REWARD_WEIGHTS["logout_penalty"]
             logger.warning("Logout/Quit detected! Large penalty applied.")
 
-        # Empty inventory penalty (checks hotbar area 1)
         if self._is_inventory_empty(current_detections):
             reward += REWARD_WEIGHTS["empty_inventory_penalty"]
 
-        # Curiosity
         if self.last_preprocessed is not None:
             diff = np.abs(current_preprocessed.astype(np.float32) - self.last_preprocessed.astype(np.float32))
             curiosity = np.mean(diff) / 255.0
@@ -246,19 +242,14 @@ class ValheimSimpleEnv(gym.Env):
         processed = self._preprocess(obs)
         self.last_preprocessed = processed.copy()
 
-        time.sleep(0.3)
-        pydirectinput.press('esc')
-
         return processed, {"episode_reward": 0.0}
 
     def step(self, action):
         self.current_step += 1
 
-        # Action Map (16 actions)
         action_map = {
             0: ("w", 0.25), 1: ("s", 0.25), 2: ("a", 0.25), 3: ("d", 0.25),
             4: ("space", 0.15), 5: ("left", 0.3), 6: ("e", 0.2), 7: (None, 0.1),
-            # Mouse look - critical for looking down at ground resources (area 9)
             8:  ("mouse_left",  MOUSE_SENSITIVITY),
             9:  ("mouse_right", MOUSE_SENSITIVITY),
             10: ("mouse_up",    MOUSE_SENSITIVITY),
