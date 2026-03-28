@@ -19,12 +19,12 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 # ─── CONFIGURATION ──────────────────────────────────────────────────────────────
 VALHEIM_WINDOW_TITLE = "Valheim"
 MODEL_SAVE = "valheim_ppo"
-YOLO_MODEL_PATH = "valheim_custom_v3.pt"           # Set to None to disable YOLO
+YOLO_MODEL_PATH = "valheim_custom_v3.pt"
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-TEMP_THRESHOLD = 82
+TEMP_THRESHOLD = 90
 VRAM_RESERVE = 450
-MAX_BURST_STEPS = 2000
+MAX_BURST_STEPS = 4000
 MOUSE_SENSITIVITY = 28
 
 REWARD_WEIGHTS = {
@@ -98,8 +98,8 @@ class ValheimSimpleEnv(gym.Env):
         self.last_preprocessed = None
         self.last_detections = Counter()
 
-        # 16 actions: 0-7 movement, 8-11 mouse look
-        self.action_space = spaces.Discrete(16)
+        # 12 actions as requested
+        self.action_space = spaces.Discrete(12)
 
         self.observation_space = spaces.Box(
             low=0, high=255,
@@ -181,24 +181,32 @@ class ValheimSimpleEnv(gym.Env):
         processed = self._preprocess(obs)
         self.last_preprocessed = processed.copy()
 
+        time.sleep(0.3)
+        pydirectinput.press('esc')
+
         return processed, {"episode_reward": 0.0}
 
     def step(self, action):
         self.current_step += 1
 
+        # Your requested action map (cleaned and fixed)
         action_map = {
             0: ("w", 0.25),      # forward
-            1: ("s", 0.25),      # back
-            2: ("a", 0.25),      # strafe left
-            3: ("d", 0.25),      # strafe right
+            1: ("s", 0.20),      # back
+            2: ("a", 0.20),      # strafe left
+            3: ("d", 0.20),      # strafe right
             4: ("space", 0.15),  # jump
-            5: ("left", 0.3),    # attack
-            6: ("e", 0.2),       # interact
-            7: (None, 0.1),      # idle
-            8:  ("mouse_left",  MOUSE_SENSITIVITY),
-            9:  ("mouse_right", MOUSE_SENSITIVITY),
-            10: ("mouse_up",    MOUSE_SENSITIVITY),
-            11: ("mouse_down",  MOUSE_SENSITIVITY),
+            5: ("left", 0.3),    # attack (left click)
+            6: ("right", 0.15),   # block (right click)
+            7: ("e", 0.2),       # interact
+            8: ("shift", 0.05),  # sprint
+            9: ("tab", 0.05),    # inventory
+            10: (None, 0.1),     # idle
+            # Mouse look actions
+            11: ("mouse_left",  MOUSE_SENSITIVITY),
+            12: ("mouse_right", MOUSE_SENSITIVITY),   # Note: action space is now 13 (0-12)
+            13: ("mouse_up",    MOUSE_SENSITIVITY),
+            14: ("mouse_down",  MOUSE_SENSITIVITY),   # Important for harvesting
         }
 
         act = action_map.get(action, (None, 0.1))
@@ -210,6 +218,11 @@ class ValheimSimpleEnv(gym.Env):
                 pydirectinput.mouseDown(button="left")
                 time.sleep(act[1])
                 pydirectinput.mouseUp(button="left")
+            elif act[0] == "right":
+                action_name = "BLOCK"
+                pydirectinput.mouseDown(button="right")
+                time.sleep(act[1])
+                pydirectinput.mouseUp(button="right")
             elif act[0].startswith("mouse_"):
                 direction = act[0]
                 amount = act[1]
@@ -226,14 +239,14 @@ class ValheimSimpleEnv(gym.Env):
                     action_name = "LOOK DOWN"
                     pydirectinput.moveRel(xOffset=0, yOffset=amount)
             else:
-                action_name = f"MOVE {act[0].upper()}"
+                action_name = f"{act[0].upper()}"
                 pydirectinput.keyDown(act[0])
                 time.sleep(act[1])
                 pydirectinput.keyUp(act[0])
         else:
             action_name = "IDLE"
 
-        # Debug: Print action every 50 steps
+        # Action debug every 50 steps
         if self.current_step % 50 == 0:
             logger.info(f"Step {self.current_step:4d} | Action: {action} → {action_name}")
 
@@ -349,6 +362,10 @@ def main():
 
         except Exception as e:
             logger.error(f"Training error: {e}")
+            # Auto-delete model on action space mismatch
+            if "Action spaces do not match" in str(e) and os.path.exists(f"{MODEL_SAVE}.zip"):
+                logger.info("Action space mismatch detected. Deleting old model...")
+                os.remove(f"{MODEL_SAVE}.zip")
         finally:
             vec_env.close()
             env.close()
