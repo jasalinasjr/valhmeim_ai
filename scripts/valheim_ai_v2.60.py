@@ -24,7 +24,6 @@ def load_config():
     if not os.path.exists(CONFIG_PATH):
         print(f"ERROR: Config file '{CONFIG_PATH}' not found!")
         exit(1)
-
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             config = yaml.safe_load(f)
@@ -39,9 +38,7 @@ def load_config():
         if key not in config:
             print(f"ERROR: Missing required key '{key}' in config.yaml")
             exit(1)
-
     return config
-
 
 config = load_config()
 
@@ -58,6 +55,16 @@ CAPTURE_REGION = config["capture_region"]
 ACTION_MAP_RAW = config["action_map"]
 ITEMS = config["items"]
 ENEMIES = config["enemies"]
+PPO_PARAMS = config.get("PPO_PARAMS", {
+    "policy": "CnnPolicy",
+    "verbose": 1,
+    "learning_rate": 3e-4,
+    "n_steps": 1024,
+    "batch_size": 64,
+    "n_epochs": 10,
+    "ent_coef": 0.01,
+    "tensorboard_log": "./valheim_ppo_logs/"
+})
 
 # Convert action_map
 ACTION_MAP = {}
@@ -107,26 +114,20 @@ def find_valheim_window():
                 rect = win32gui.GetWindowRect(hwnd)
                 windows.append((hwnd, rect))
         return True
-
     windows = []
     win32gui.EnumWindows(callback, windows)
     if windows:
         _, rect = windows[0]
         left, top, right, bottom = rect
-        return {
-            "top": top + 40,
-            "left": left + 8,
-            "width": right - left - 16,
-            "height": bottom - top - 48
-        }
+        return {"top": top + 40, "left": left + 8, "width": right - left - 16, "height": bottom - top - 48}
     return None
 
 
-# ─── VALHEIM ENVIRONMENT ────────────────────────────────────────────────────────
 class ValheimSimpleEnv(gym.Env):
     def __init__(self, image_size=(84, 84)):
         super().__init__()
         self.image_size = image_size
+        self.detection_size = (640, 640)
 
         self.sct = mss.mss()
         self.capture_region = CAPTURE_REGION.copy()
@@ -137,12 +138,7 @@ class ValheimSimpleEnv(gym.Env):
         self.last_potential = 0.0
 
         self.action_space = spaces.Discrete(len(ACTION_MAP))
-
-        self.observation_space = spaces.Box(
-            low=0, high=255,
-            shape=(image_size[0], image_size[1], 3),
-            dtype=np.uint8
-        )
+        self.observation_space = spaces.Box(low=0, high=255, shape=(image_size[0], image_size[1], 3), dtype=np.uint8)
 
         self.yolo = None
         if YOLO_MODEL_PATH and os.path.exists(YOLO_MODEL_PATH):
@@ -150,6 +146,9 @@ class ValheimSimpleEnv(gym.Env):
                 from ultralytics import YOLO
                 self.yolo = YOLO(YOLO_MODEL_PATH)
                 logger.info(f"YOLO loaded: {YOLO_MODEL_PATH}")
+                print("\nYOLO CLASSES:")
+                for idx, name in self.yolo.names.items():
+                    print(f"  {idx:2d}: {name}")
             except Exception as e:
                 logger.warning(f"YOLO load failed: {e}")
 
@@ -157,11 +156,9 @@ class ValheimSimpleEnv(gym.Env):
         self.episode_reward = 0.0
 
     def _update_capture_region(self):
-        """Update capture region using window detection"""
         region = find_valheim_window()
         if region:
             self.capture_region = region
-        # Fallback to config/default if window not found
         elif not self.capture_region:
             self.capture_region = CAPTURE_REGION.copy()
 
@@ -175,6 +172,9 @@ class ValheimSimpleEnv(gym.Env):
 
     def _preprocess(self, img):
         return cv2.resize(img, self.image_size, interpolation=cv2.INTER_AREA)
+
+    def _detect_image(self, img):
+        return cv2.resize(img, self.detection_size, interpolation=cv2.INTER_AREA)
 
     def _health_proxy(self, img: np.ndarray) -> float:
         try:
@@ -194,10 +194,13 @@ class ValheimSimpleEnv(gym.Env):
             red_mask = cv2.bitwise_or(mask1, mask2)
 
             red_ratio = np.sum(red_mask > 0) / red_mask.size
+            mean_val = np.mean(health_region)
 
-            if np.mean(health_region) < 40:
+            if self.current_step % 30 == 0:
+                logger.info(f"Health Proxy Debug | red_ratio={red_ratio:.3f} | mean={mean_val:.1f}")
+
+            if mean_val < 40:
                 return max(0.05, red_ratio * 0.6)
-
             return float(np.clip(red_ratio, 0.05, 1.0))
         except:
             return 0.5
@@ -206,35 +209,57 @@ class ValheimSimpleEnv(gym.Env):
         if not self.yolo:
             return Counter()
         try:
-            results = self.yolo(img, verbose=False)[0]
+            detect_img = self._detect_image(img)
+            results = self.yolo(detect_img, verbose=False)[0]
             names = [results.names[int(c)] for c in results.boxes.cls]
+            confs = results.boxes.conf.tolist()
+            if self.current_step % 30 == 0:
+                raw = {name: round(conf, 2) for name, conf in zip(names, confs)}
+                logger.info(f"RAW YOLO | {raw}")
             return Counter(names)
-        except:
+        except Exception as e:
+            if self.current_step % 30 == 0:
+                logger.warning(f"YOLO inference failed: {e}")
             return Counter()
 
-    def _compute_reward(self, current_detections: Counter, current_health: float) -> float:
+    def _compute_reward(self, current_detections: Counter, current_health: float, 
+                       current_preprocessed: np.ndarray, action: int) -> float:
+        """Fixed: All variables explicitly passed"""
         reward = REWARD_WEIGHTS["time_penalty"]
 
         # Resource collection
-        resource_reward = sum(REWARD_WEIGHTS["wood_bonus"] * (current_detections.get(item, 0) - self.last_detections.get(item, 0)) 
-                              for item in ITEMS if current_detections.get(item, 0) > self.last_detections.get(item, 0))
+        resource_reward = sum(
+            REWARD_WEIGHTS["wood_bonus"] * (current_detections.get(item, 0) - self.last_detections.get(item, 0))
+            for item in ITEMS 
+            if current_detections.get(item, 0) > self.last_detections.get(item, 0)
+        )
         reward += resource_reward
 
         # Kill proxy
-        kill_reward = sum(REWARD_WEIGHTS["kill_bonus"] * (self.last_detections.get(enemy, 0) - current_detections.get(enemy, 0)) 
-                          for enemy in ENEMIES if self.last_detections.get(enemy, 0) > current_detections.get(enemy, 0))
+        kill_reward = sum(
+            REWARD_WEIGHTS["kill_bonus"] * (self.last_detections.get(enemy, 0) - current_detections.get(enemy, 0))
+            for enemy in ENEMIES 
+            if self.last_detections.get(enemy, 0) > current_detections.get(enemy, 0)
+        )
         reward += kill_reward
 
         # Health shaping
         health_delta = current_health - self.last_health_proxy
-        health_reward = REWARD_WEIGHTS["health_gain_bonus"] if health_delta > 0.08 else (REWARD_WEIGHTS["health_loss_penalty"] if health_delta < -0.08 else 0.0)
+        health_reward = (
+            REWARD_WEIGHTS["health_gain_bonus"] if health_delta > 0.08 else
+            (REWARD_WEIGHTS["health_loss_penalty"] if health_delta < -0.08 else 0.0)
+        )
         reward += health_reward
 
         # Enemy visible penalty
-        enemy_visible_reward = sum(REWARD_WEIGHTS["enemy_visible_penalty"] for enemy in ENEMIES if enemy in current_detections)
+        enemy_visible_reward = sum(
+            REWARD_WEIGHTS["enemy_visible_penalty"] 
+            for enemy in ENEMIES 
+            if enemy in current_detections
+        )
         reward += enemy_visible_reward
 
-        # Action shaping - bonus for looking down (action 23)
+        # Action shaping
         if self.current_step > 0 and action == 23:
             reward += 0.6
 
@@ -245,7 +270,7 @@ class ValheimSimpleEnv(gym.Env):
             reward += shaping
         self.last_potential = potential
 
-        # Curiosity
+        # Curiosity - uses the passed current_preprocessed
         curiosity_reward = 0.0
         if self.last_preprocessed is not None:
             diff = np.abs(current_preprocessed.astype(np.float32) - self.last_preprocessed.astype(np.float32))
@@ -278,7 +303,6 @@ class ValheimSimpleEnv(gym.Env):
     def step(self, action):
         self.current_step += 1
 
-        # Use ACTION_MAP from global scope
         act = ACTION_MAP.get(action, (None, 0.1))
         action_name = "unknown"
 
@@ -322,30 +346,36 @@ class ValheimSimpleEnv(gym.Env):
         obs = self._capture_screen()
         self.last_obs = obs
         processed = self._preprocess(obs)
-        current_preprocessed = processed.copy()
+        current_preprocessed = processed.copy()          # ← Always defined here
 
         current_detections = self._get_detections(obs)
         current_health = self._health_proxy(obs)
 
-        # Detection logging every 30 steps
+        reward = self._compute_reward(current_detections, current_health, current_preprocessed, action)
+        self.episode_reward += reward
+
         if self.current_step % 30 == 0:
             resources = {k: v for k, v in current_detections.items() if k in ITEMS}
             enemies_detected = {k: v for k, v in current_detections.items() if k in ENEMIES}
             logger.info(f"Detections | Resources: {resources} | Enemies: {enemies_detected} | Health: {current_health:.2f}")
 
-        reward = self._compute_reward(current_detections, current_health)
-        self.episode_reward += reward
-
-        # Detailed reward breakdown every 100 steps
         if self.current_step % 100 == 0:
-            resource_reward = sum(REWARD_WEIGHTS["wood_bonus"] * (current_detections.get(item, 0) - self.last_detections.get(item, 0)) 
-                                  for item in ITEMS if current_detections.get(item, 0) > self.last_detections.get(item, 0))
-            kill_reward = sum(REWARD_WEIGHTS["kill_bonus"] * (self.last_detections.get(enemy, 0) - current_detections.get(enemy, 0)) 
-                              for enemy in ENEMIES if self.last_detections.get(enemy, 0) > current_detections.get(enemy, 0))
+            resource_reward = sum(
+                REWARD_WEIGHTS["wood_bonus"] * (current_detections.get(item, 0) - self.last_detections.get(item, 0))
+                for item in ITEMS if current_detections.get(item, 0) > self.last_detections.get(item, 0)
+            )
+            kill_reward = sum(
+                REWARD_WEIGHTS["kill_bonus"] * (self.last_detections.get(enemy, 0) - current_detections.get(enemy, 0))
+                for enemy in ENEMIES if self.last_detections.get(enemy, 0) > current_detections.get(enemy, 0)
+            )
             health_delta = current_health - self.last_health_proxy
-            health_reward = REWARD_WEIGHTS["health_gain_bonus"] if health_delta > 0.08 else (REWARD_WEIGHTS["health_loss_penalty"] if health_delta < -0.08 else 0.0)
-            enemy_visible_reward = sum(REWARD_WEIGHTS["enemy_visible_penalty"] for enemy in ENEMIES if enemy in current_detections)
-            
+            health_reward = (
+                REWARD_WEIGHTS["health_gain_bonus"] if health_delta > 0.08 else
+                (REWARD_WEIGHTS["health_loss_penalty"] if health_delta < -0.08 else 0.0)
+            )
+            enemy_visible_reward = sum(
+                REWARD_WEIGHTS["enemy_visible_penalty"] for enemy in ENEMIES if enemy in current_detections
+            )
             curiosity_reward = 0.0
             if self.last_preprocessed is not None:
                 diff = np.abs(current_preprocessed.astype(np.float32) - self.last_preprocessed.astype(np.float32))
@@ -406,7 +436,6 @@ def main():
 
     total_timesteps = 0
 
-    # YOLO Debug Block
     if YOLO_MODEL_PATH and os.path.exists(YOLO_MODEL_PATH):
         try:
             from ultralytics import YOLO
@@ -445,16 +474,7 @@ def main():
                 model = PPO(
                     env=vec_env,
                     device=DEVICE,
-                    **config.get("PPO_PARAMS", {
-                        "policy": "CnnPolicy",
-                        "verbose": 1,
-                        "learning_rate": 3e-4,
-                        "n_steps": 1024,
-                        "batch_size": 64,
-                        "n_epochs": 10,
-                        "ent_coef": 0.01,
-                        "tensorboard_log": "./valheim_ppo_logs/"
-                    })
+                    **PPO_PARAMS
                 )
 
             logger.info(f"Training burst — {MAX_BURST_STEPS} steps")
