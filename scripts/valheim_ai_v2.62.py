@@ -84,6 +84,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+os.makedirs("debug_screenshots", exist_ok=True)
+
 nvml_handle = None
 try:
     nvmlInit()
@@ -145,7 +147,8 @@ class ValheimSimpleEnv(gym.Env):
             try:
                 from ultralytics import YOLO
                 self.yolo = YOLO(YOLO_MODEL_PATH)
-                logger.info(f"YOLO loaded: {YOLO_MODEL_PATH}")
+                self.yolo.conf = 0.25
+                logger.info(f"YOLO loaded: {YOLO_MODEL_PATH} (conf=0.25)")
                 print("\nYOLO CLASSES:")
                 for idx, name in self.yolo.names.items():
                     print(f"  {idx:2d}: {name}")
@@ -197,7 +200,7 @@ class ValheimSimpleEnv(gym.Env):
             mean_val = np.mean(health_region)
 
             if self.current_step % 30 == 0:
-                logger.info(f"Health Proxy Debug | red_ratio={red_ratio:.3f} | mean={mean_val:.1f}")
+                logger.info(f"Health Proxy Debug | red_ratio={red_ratio:.3f} | mean={mean_val:.1f} | region_shape={health_region.shape}")
 
             if mean_val < 40:
                 return max(0.05, red_ratio * 0.6)
@@ -213,9 +216,11 @@ class ValheimSimpleEnv(gym.Env):
             results = self.yolo(detect_img, verbose=False)[0]
             names = [results.names[int(c)] for c in results.boxes.cls]
             confs = results.boxes.conf.tolist()
+
             if self.current_step % 30 == 0:
                 raw = {name: round(conf, 2) for name, conf in zip(names, confs)}
                 logger.info(f"RAW YOLO | {raw}")
+
             return Counter(names)
         except Exception as e:
             if self.current_step % 30 == 0:
@@ -224,10 +229,9 @@ class ValheimSimpleEnv(gym.Env):
 
     def _compute_reward(self, current_detections: Counter, current_health: float, 
                        current_preprocessed: np.ndarray, action: int) -> float:
-        """Fixed: All variables explicitly passed"""
+        """All variables explicitly passed - no scoping errors"""
         reward = REWARD_WEIGHTS["time_penalty"]
 
-        # Resource collection
         resource_reward = sum(
             REWARD_WEIGHTS["wood_bonus"] * (current_detections.get(item, 0) - self.last_detections.get(item, 0))
             for item in ITEMS 
@@ -235,7 +239,6 @@ class ValheimSimpleEnv(gym.Env):
         )
         reward += resource_reward
 
-        # Kill proxy
         kill_reward = sum(
             REWARD_WEIGHTS["kill_bonus"] * (self.last_detections.get(enemy, 0) - current_detections.get(enemy, 0))
             for enemy in ENEMIES 
@@ -243,7 +246,6 @@ class ValheimSimpleEnv(gym.Env):
         )
         reward += kill_reward
 
-        # Health shaping
         health_delta = current_health - self.last_health_proxy
         health_reward = (
             REWARD_WEIGHTS["health_gain_bonus"] if health_delta > 0.08 else
@@ -251,7 +253,6 @@ class ValheimSimpleEnv(gym.Env):
         )
         reward += health_reward
 
-        # Enemy visible penalty
         enemy_visible_reward = sum(
             REWARD_WEIGHTS["enemy_visible_penalty"] 
             for enemy in ENEMIES 
@@ -259,18 +260,15 @@ class ValheimSimpleEnv(gym.Env):
         )
         reward += enemy_visible_reward
 
-        # Action shaping
         if self.current_step > 0 and action == 23:
             reward += 0.6
 
-        # Potential-based shaping
         potential = current_health * 8.0 + len([k for k in current_detections if k in ITEMS]) * 3.0
         if hasattr(self, 'last_potential'):
             shaping = 0.99 * potential - self.last_potential
             reward += shaping
         self.last_potential = potential
 
-        # Curiosity - uses the passed current_preprocessed
         curiosity_reward = 0.0
         if self.last_preprocessed is not None:
             diff = np.abs(current_preprocessed.astype(np.float32) - self.last_preprocessed.astype(np.float32))
@@ -346,7 +344,7 @@ class ValheimSimpleEnv(gym.Env):
         obs = self._capture_screen()
         self.last_obs = obs
         processed = self._preprocess(obs)
-        current_preprocessed = processed.copy()          # ← Always defined here
+        current_preprocessed = processed.copy()   # ← Always defined here
 
         current_detections = self._get_detections(obs)
         current_health = self._health_proxy(obs)
@@ -389,6 +387,17 @@ class ValheimSimpleEnv(gym.Env):
                         f"EnemyVisible={enemy_visible_reward:.2f} | "
                         f"Curiosity={curiosity_reward:.2f} | "
                         f"Total={reward:.2f}")
+
+            # Save debug screenshot with detections
+            debug_img = self._detect_image(self.last_obs.copy())
+            if self.yolo:
+                try:
+                    results = self.yolo(debug_img, verbose=False)[0]
+                    annotated = results.plot()
+                    cv2.imwrite(f"debug_screenshots/step_{self.current_step:06d}.jpg", annotated)
+                    logger.info(f"Debug screenshot saved: debug_screenshots/step_{self.current_step:06d}.jpg")
+                except:
+                    pass
 
         self.last_detections = current_detections
         self.last_health_proxy = current_health
