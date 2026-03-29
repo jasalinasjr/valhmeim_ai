@@ -37,10 +37,15 @@ Training AI model to play Valheim with reinforcement learning.
 **valheim_ai_v2.30.py**
 - Reintroduce HUD tracking (health only)
 - Improve rewards/penalties
+- Tested working
+
+**valheim_ai_v2.56**
+- Improved training
+- Additional actions
+- Additional rewards/penalties
+- Move settings to config.yml
 - Untested
 
 ### ToDo
 
-- Split out configs into separate files (maybe yml)
-- Test and verify v2.30
-- Add additional actions and rewards
+- Test and verify v2.56
