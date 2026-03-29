@@ -22,17 +22,18 @@ MODEL_SAVE = "valheim_ppo"
 YOLO_MODEL_PATH = "valheim_custom_v3.pt"
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-TEMP_THRESHOLD = 82
+TEMP_THRESHOLD = 90
 VRAM_RESERVE = 450
-MAX_BURST_STEPS = 2000
-MOUSE_SENSITIVITY = 28
+MAX_BURST_STEPS = 4000
+MOUSE_SENSITIVITY = 52
 
+# Improved reward weights with health shaping
 REWARD_WEIGHTS = {
     "time_penalty": -0.01,
     "wood_bonus": 2.0,
-    "kill_bonus": 8.0,           # Bigger reward for killing
-    "health_gain_bonus": 4.0,    # Reward for healing
-    "health_loss_penalty": -3.0, # Penalty for taking damage
+    "kill_bonus": 8.0,              # Big reward for killing
+    "health_gain_bonus": 4.0,       # Reward for healing
+    "health_loss_penalty": -3.0,    # Penalty for taking damage
     "enemy_visible_penalty": -1.5,
     "curiosity_scale": 0.4
 }
@@ -100,7 +101,7 @@ class ValheimSimpleEnv(gym.Env):
         self.last_obs = None
         self.last_preprocessed = None
         self.last_detections = Counter()
-        self.last_health_proxy = 0.5   # Start at neutral
+        self.last_health_proxy = 0.5
 
         self.action_space = spaces.Discrete(24)
 
@@ -141,7 +142,7 @@ class ValheimSimpleEnv(gym.Env):
         return cv2.resize(img, self.image_size, interpolation=cv2.INTER_AREA)
 
     def _health_proxy(self, img: np.ndarray) -> float:
-        """Robust health tracking for bottom-left red bar (area 6)"""
+        """Health proxy for bottom-left red bar (area 6)"""
         try:
             h, w = img.shape[:2]
             y_start = max(0, h - 130)
@@ -186,20 +187,20 @@ class ValheimSimpleEnv(gym.Env):
             if delta > 0:
                 reward += REWARD_WEIGHTS["wood_bonus"] * delta
 
-        # Kill proxy (enemy count decreases)
+        # Kill proxy
         for enemy in ["greydwarf", "troll", "wolf", "skeleton", "enemy"]:
             delta = self.last_detections.get(enemy, 0) - current_detections.get(enemy, 0)
             if delta > 0:
                 reward += REWARD_WEIGHTS["kill_bonus"] * delta
 
-        # Health change tracking
+        # Health shaping
         health_delta = current_health - self.last_health_proxy
-        if health_delta > 0.08:      # Healing
+        if health_delta > 0.08:
             reward += REWARD_WEIGHTS["health_gain_bonus"]
-        elif health_delta < -0.08:   # Damage taken
+        elif health_delta < -0.08:
             reward += REWARD_WEIGHTS["health_loss_penalty"]
 
-        # Enemy visible penalty (softer than before)
+        # Enemy visible penalty
         for enemy in ["greydwarf", "troll", "wolf", "skeleton", "enemy"]:
             if enemy in current_detections:
                 reward += REWARD_WEIGHTS["enemy_visible_penalty"]
