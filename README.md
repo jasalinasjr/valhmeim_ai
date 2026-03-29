@@ -39,7 +39,7 @@ Training AI model to play Valheim with reinforcement learning.
 - Improve rewards/penalties
 - Tested working
 
-**valheim_ai_v2.58**
+**valheim_ai_v2.59**
 - Improved training
 - Additional actions
 - Additional rewards/penalties
