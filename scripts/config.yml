@@ -1,0 +1,80 @@
+--- # Valheim AI Configuration
+
+# General Settings
+VALHEIM_WINDOW_TITLE: "Valheim"
+MODEL_SAVE: "valheim_ppo"
+YOLO_MODEL_PATH: "valheim_custom_v3.pt"
+DEVICE: "cuda"
+TEMP_THRESHOLD: 90
+VRAM_RESERVE: 450
+MAX_BURST_STEPS: 4000
+MOUSE_SENSITIVITY: 56
+
+# Capture Region (for 1280x960)
+capture_region:
+  top: 40
+  left: 0
+  width: 1280
+  height: 880
+
+# Reward Weights
+REWARD_WEIGHTS:
+  time_penalty: -0.01
+  wood_bonus: 2.0
+  kill_bonus: 8.0
+  health_gain_bonus: 4.0
+  health_loss_penalty: -3.0
+  enemy_visible_penalty: -1.5
+  curiosity_scale: 0.4
+
+# Action Map (24 actions)
+action_map:
+  0: ["w", 0.25]        # forward
+  1: ["s", 0.25]        # back
+  2: ["a", 0.25]        # strafe left
+  3: ["d", 0.25]        # strafe right
+  4: ["space", 0.15]    # jump
+  5: ["left", 0.3]      # attack
+  6: ["right", 0.3]     # block
+  7: ["e", 0.2]         # interact
+  8: ["shift", 0.15]    # sprint
+  9: ["tab", 0.05]      # inventory
+  10: ["x", 0.05]       # sit
+  11: ["1", 0.15]       # hotbar 1
+  12: ["2", 0.15]       # hotbar 2
+  13: ["3", 0.15]       # hotbar 3
+  14: ["4", 0.15]       # hotbar 4
+  15: ["5", 0.15]       # hotbar 5
+  16: ["6", 0.15]       # hotbar 6
+  17: ["7", 0.15]       # hotbar 7
+  18: ["8", 0.15]       # hotbar 8
+  19: [null, 0.1]       # idle
+  20: ["mouse_left", "MOUSE_SENSITIVITY"]
+  21: ["mouse_right", "MOUSE_SENSITIVITY"]
+  22: ["mouse_up", "MOUSE_SENSITIVITY"]
+  23: ["mouse_down", "MOUSE_SENSITIVITY"]
+
+# Resources for reward calculation
+items:
+  - wood
+	- raspberry
+	- stone
+	- flint
+	- resin
+	- leather scraps
+	- mushroom
+	- raw meat
+	- deer hide
+	- bone fragments
+
+# Enemies for reward calculation
+enemies:
+  - greyling
+	- boar
+	- deer
+	- neck
+	- greydwarf
+	- troll
+	- wolf
+	- skeleton
+	- enemy
