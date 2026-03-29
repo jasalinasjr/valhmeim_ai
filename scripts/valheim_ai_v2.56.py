@@ -17,17 +17,34 @@ import gymnasium as gym
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-# Load configuration from YAML
+# ─── CONFIGURATION LOADING WITH VALIDATION ─────────────────────────────────────
 CONFIG_PATH = "config.yaml"
 
-if not os.path.exists(CONFIG_PATH):
-    logger.error(f"Config file {CONFIG_PATH} not found!")
-    exit(1)
+def load_config():
+    if not os.path.exists(CONFIG_PATH):
+        print(f"ERROR: Config file '{CONFIG_PATH}' not found!")
+        exit(1)
 
-with open(CONFIG_PATH, "r") as f:
-    config = yaml.safe_load(f)
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+    except Exception as e:
+        print(f"ERROR: Failed to load config: {e}")
+        exit(1)
 
-# Extract settings
+    required = ["VALHEIM_WINDOW_TITLE", "MODEL_SAVE", "YOLO_MODEL_PATH", "DEVICE", 
+                "TEMP_THRESHOLD", "VRAM_RESERVE", "MAX_BURST_STEPS", "MOUSE_SENSITIVITY",
+                "REWARD_WEIGHTS", "capture_region", "action_map", "items", "enemies"]
+    for key in required:
+        if key not in config:
+            print(f"ERROR: Missing required key '{key}' in config.yaml")
+            exit(1)
+
+    return config
+
+
+config = load_config()
+
 VALHEIM_WINDOW_TITLE = config["VALHEIM_WINDOW_TITLE"]
 MODEL_SAVE = config["MODEL_SAVE"]
 YOLO_MODEL_PATH = config["YOLO_MODEL_PATH"]
@@ -42,13 +59,16 @@ ACTION_MAP_RAW = config["action_map"]
 ITEMS = config["items"]
 ENEMIES = config["enemies"]
 
-# Convert action_map from YAML to proper format
+# Convert action_map
 ACTION_MAP = {}
 for key, value in ACTION_MAP_RAW.items():
-    if value[0] == "MOUSE_SENSITIVITY":
-        ACTION_MAP[key] = ("mouse_" + value[0].split("_")[1].lower(), MOUSE_SENSITIVITY) if "mouse" in value[0] else value
+    if isinstance(value, list):
+        if len(value) >= 2 and value[1] == "MOUSE_SENSITIVITY":
+            ACTION_MAP[int(key)] = (f"mouse_{value[0].split('_')[-1]}", MOUSE_SENSITIVITY)
+        else:
+            ACTION_MAP[int(key)] = tuple(value)
     else:
-        ACTION_MAP[key] = tuple(value) if isinstance(value, list) else value
+        ACTION_MAP[int(key)] = value
 
 logging.basicConfig(
     level=logging.INFO,
@@ -102,6 +122,7 @@ def find_valheim_window():
     return None
 
 
+# ─── VALHEIM ENVIRONMENT ────────────────────────────────────────────────────────
 class ValheimSimpleEnv(gym.Env):
     def __init__(self, image_size=(84, 84)):
         super().__init__()
@@ -113,6 +134,7 @@ class ValheimSimpleEnv(gym.Env):
         self.last_preprocessed = None
         self.last_detections = Counter()
         self.last_health_proxy = 0.5
+        self.last_potential = 0.0
 
         self.action_space = spaces.Discrete(len(ACTION_MAP))
 
@@ -182,30 +204,45 @@ class ValheimSimpleEnv(gym.Env):
     def _compute_reward(self, current_detections: Counter, current_health: float) -> float:
         reward = REWARD_WEIGHTS["time_penalty"]
 
+        # Resource collection
+        resource_reward = 0.0
         for item in ITEMS:
-            delta = current_detections[item] - self.last_detections.get(item, 0)
+            delta = current_detections.get(item, 0) - self.last_detections.get(item, 0)
             if delta > 0:
-                reward += REWARD_WEIGHTS["wood_bonus"] * delta
+                resource_reward += REWARD_WEIGHTS["wood_bonus"] * delta
+        reward += resource_reward
 
+        # Kill proxy
+        kill_reward = 0.0
         for enemy in ENEMIES:
             delta = self.last_detections.get(enemy, 0) - current_detections.get(enemy, 0)
             if delta > 0:
-                reward += REWARD_WEIGHTS["kill_bonus"] * delta
+                kill_reward += REWARD_WEIGHTS["kill_bonus"] * delta
+        reward += kill_reward
 
+        # Health shaping
+        health_reward = 0.0
         health_delta = current_health - self.last_health_proxy
         if health_delta > 0.08:
-            reward += REWARD_WEIGHTS["health_gain_bonus"]
+            health_reward = REWARD_WEIGHTS["health_gain_bonus"]
         elif health_delta < -0.08:
-            reward += REWARD_WEIGHTS["health_loss_penalty"]
+            health_reward = REWARD_WEIGHTS["health_loss_penalty"]
+        reward += health_reward
 
+        # Enemy visible penalty
+        enemy_penalty = 0.0
         for enemy in ENEMIES:
             if enemy in current_detections:
-                reward += REWARD_WEIGHTS["enemy_visible_penalty"]
+                enemy_penalty += REWARD_WEIGHTS["enemy_visible_penalty"]
+        reward += enemy_penalty
 
+        # Curiosity
+        curiosity_reward = 0.0
         if self.last_preprocessed is not None:
             diff = np.abs(current_preprocessed.astype(np.float32) - self.last_preprocessed.astype(np.float32))
             curiosity = np.mean(diff) / 255.0
-            reward += REWARD_WEIGHTS["curiosity_scale"] * curiosity
+            curiosity_reward = REWARD_WEIGHTS["curiosity_scale"] * curiosity
+            reward += curiosity_reward
 
         return reward
 
@@ -215,6 +252,8 @@ class ValheimSimpleEnv(gym.Env):
         self.episode_reward = 0.0
         self.last_detections = Counter()
         self.last_health_proxy = 0.5
+        self.last_potential = 0.0
+        self._update_capture_region()
 
         pydirectinput.press('esc')
         time.sleep(0.3)
@@ -229,7 +268,21 @@ class ValheimSimpleEnv(gym.Env):
     def step(self, action):
         self.current_step += 1
 
-        act = ACTION_MAP.get(action, (None, 0.1))
+        action_map = {
+            0: ("w", 0.25), 1: ("s", 0.25), 2: ("a", 0.25), 3: ("d", 0.25),
+            4: ("space", 0.15), 5: ("left", 0.3), 6: ("right", 0.3),
+            7: ("e", 0.2), 8: ("shift", 0.15), 9: ("tab", 0.05),
+            10: ("x", 0.05),
+            11: ("1", 0.15), 12: ("2", 0.15), 13: ("3", 0.15), 14: ("4", 0.15),
+            15: ("5", 0.15), 16: ("6", 0.15), 17: ("7", 0.15), 18: ("8", 0.15),
+            19: (None, 0.1),
+            20: ("mouse_left", MOUSE_SENSITIVITY),
+            21: ("mouse_right", MOUSE_SENSITIVITY),
+            22: ("mouse_up", MOUSE_SENSITIVITY),
+            23: ("mouse_down", MOUSE_SENSITIVITY),
+        }
+
+        act = action_map.get(action, (None, 0.1))
         action_name = "unknown"
 
         if act[0] is not None:
@@ -283,6 +336,31 @@ class ValheimSimpleEnv(gym.Env):
         self.last_detections = current_detections
         self.last_health_proxy = current_health
         self.last_preprocessed = current_preprocessed
+
+        # === Detailed Reward Component Logging every 100 steps ===
+        if self.current_step % 100 == 0:
+            resource_reward = sum(REWARD_WEIGHTS["wood_bonus"] * (current_detections.get(item, 0) - self.last_detections.get(item, 0)) 
+                                  for item in ITEMS if current_detections.get(item, 0) > self.last_detections.get(item, 0))
+            kill_reward = sum(REWARD_WEIGHTS["kill_bonus"] * (self.last_detections.get(enemy, 0) - current_detections.get(enemy, 0)) 
+                              for enemy in ENEMIES if self.last_detections.get(enemy, 0) > current_detections.get(enemy, 0))
+            health_delta = current_health - self.last_health_proxy
+            health_reward = REWARD_WEIGHTS["health_gain_bonus"] if health_delta > 0.08 else (REWARD_WEIGHTS["health_loss_penalty"] if health_delta < -0.08 else 0.0)
+            
+            enemy_visible_reward = sum(REWARD_WEIGHTS["enemy_visible_penalty"] for enemy in ENEMIES if enemy in current_detections)
+            
+            curiosity_reward = 0.0
+            if self.last_preprocessed is not None:
+                diff = np.abs(current_preprocessed.astype(np.float32) - self.last_preprocessed.astype(np.float32))
+                curiosity_reward = REWARD_WEIGHTS["curiosity_scale"] * (np.mean(diff) / 255.0)
+
+            logger.info(f"Reward Breakdown @ Step {self.current_step}: "
+                        f"Time={REWARD_WEIGHTS['time_penalty']:.2f} | "
+                        f"Resources={resource_reward:.2f} | "
+                        f"Kills={kill_reward:.2f} | "
+                        f"Health={health_reward:.2f} | "
+                        f"EnemyVisible={enemy_visible_reward:.2f} | "
+                        f"Curiosity={curiosity_reward:.2f} | "
+                        f"Total={reward:.2f}")
 
         terminated = False
         truncated = self.current_step > 4000
@@ -363,16 +441,18 @@ def main():
             else:
                 logger.info("No saved model found. Creating new PPO model.")
                 model = PPO(
-                    "CnnPolicy",
-                    vec_env,
-                    verbose=1,
+                    env=vec_env,
                     device=DEVICE,
-                    learning_rate=3e-4,
-                    n_steps=1024,
-                    batch_size=64,
-                    n_epochs=10,
-                    ent_coef=0.01,
-                    tensorboard_log="./valheim_ppo_logs/"
+                    **config.get("PPO_PARAMS", {
+                        "policy": "CnnPolicy",
+                        "verbose": 1,
+                        "learning_rate": 3e-4,
+                        "n_steps": 1024,
+                        "batch_size": 64,
+                        "n_epochs": 10,
+                        "ent_coef": 0.01,
+                        "tensorboard_log": "./valheim_ppo_logs/"
+                    })
                 )
 
             logger.info(f"Training burst — {MAX_BURST_STEPS} steps")
