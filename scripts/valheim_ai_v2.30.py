@@ -27,13 +27,12 @@ VRAM_RESERVE = 450
 MAX_BURST_STEPS = 4000
 MOUSE_SENSITIVITY = 52
 
-# Improved reward weights with health shaping
 REWARD_WEIGHTS = {
     "time_penalty": -0.01,
     "wood_bonus": 2.0,
-    "kill_bonus": 8.0,              # Big reward for killing
-    "health_gain_bonus": 4.0,       # Reward for healing
-    "health_loss_penalty": -3.0,    # Penalty for taking damage
+    "kill_bonus": 8.0,
+    "health_gain_bonus": 4.0,
+    "health_loss_penalty": -3.0,
     "enemy_visible_penalty": -1.5,
     "curiosity_scale": 0.4
 }
@@ -90,7 +89,6 @@ def find_valheim_window():
     return None
 
 
-# ─── VALHEIM ENVIRONMENT ────────────────────────────────────────────────────────
 class ValheimSimpleEnv(gym.Env):
     def __init__(self, image_size=(84, 84)):
         super().__init__()
@@ -142,7 +140,7 @@ class ValheimSimpleEnv(gym.Env):
         return cv2.resize(img, self.image_size, interpolation=cv2.INTER_AREA)
 
     def _health_proxy(self, img: np.ndarray) -> float:
-        """Health proxy for bottom-left red bar (area 6)"""
+        """Health proxy for bottom-left red bar"""
         try:
             h, w = img.shape[:2]
             y_start = max(0, h - 130)
@@ -207,7 +205,7 @@ class ValheimSimpleEnv(gym.Env):
 
         # Curiosity
         if self.last_preprocessed is not None:
-            diff = np.abs(current_preprocessed.astype(np.float32) - self.last_preprocessed.astype(np.float32))
+            diff = np.abs(self.last_preprocessed.astype(np.float32) - self.last_preprocessed.astype(np.float32))
             curiosity = np.mean(diff) / 255.0
             reward += REWARD_WEIGHTS["curiosity_scale"] * curiosity
 
@@ -291,7 +289,7 @@ class ValheimSimpleEnv(gym.Env):
         obs = self._capture_screen()
         self.last_obs = obs
         processed = self._preprocess(obs)
-        current_preprocessed = processed.copy()
+        current_preprocessed = processed.copy()          # ← Always defined here
 
         current_detections = self._get_detections(obs)
         current_health = self._health_proxy(obs)
