@@ -2,7 +2,7 @@
 
 Training AI model to play Valheim with reinforcement learning.
 
-## Info
+## Log
 
 **valheim_ai_v1.py**
 - Basic training with limited
@@ -18,27 +18,29 @@ Training AI model to play Valheim with reinforcement learning.
 **valheim_ai_v2.py**
 - Improved training
 - Additional random actions:
+  - sit (x)
+  - inventory (tab)
+  - hotbar (1-8)
+  - sprint (shift)
   - look left
   - look right
   - look down
   - look up
 - Additional rewards/penalties
-- Untested
-
-**valheim_ai_v2.10.py**
-- Additional debugging
-- Untested
+- Tested working (Needed to delete previous model)
 
 **valheim_ai_v2.25.py**
 - Improved training
 - Additional actions
-- Additional rewards/penalties
-- HUD tracking
+- Tested working
+
+**valheim_ai_v2.30.py**
+- Reintroduce HUD tracking (health only)
+- Improve rewards/penalties
+- Untested
 
 ### ToDo
 
 - Split out configs into separate files (maybe yml)
-- Test and verify v2
-- Test and verify v2.10
-- Test and verify v2.25
+- Test and verify v2.30
 - Add additional actions and rewards
