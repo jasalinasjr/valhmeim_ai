@@ -17,7 +17,7 @@ import gymnasium as gym
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-# ─── CONFIGURATION LOADING WITH VALIDATION ─────────────────────────────────────
+# ─── CONFIGURATION LOADING ─────────────────────────────────────────────────────
 CONFIG_PATH = "config.yaml"
 
 def load_config():
@@ -156,7 +156,18 @@ class ValheimSimpleEnv(gym.Env):
         self.current_step = 0
         self.episode_reward = 0.0
 
+    def _update_capture_region(self):
+        """Update capture region using window detection"""
+        region = find_valheim_window()
+        if region:
+            self.capture_region = region
+        # Fallback to config/default if window not found
+        elif not self.capture_region:
+            self.capture_region = CAPTURE_REGION.copy()
+
     def _capture_screen(self):
+        if not self.capture_region:
+            self._update_capture_region()
         screenshot = self.sct.grab(self.capture_region)
         img = np.array(screenshot)
         img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
@@ -205,36 +216,34 @@ class ValheimSimpleEnv(gym.Env):
         reward = REWARD_WEIGHTS["time_penalty"]
 
         # Resource collection
-        resource_reward = 0.0
-        for item in ITEMS:
-            delta = current_detections.get(item, 0) - self.last_detections.get(item, 0)
-            if delta > 0:
-                resource_reward += REWARD_WEIGHTS["wood_bonus"] * delta
+        resource_reward = sum(REWARD_WEIGHTS["wood_bonus"] * (current_detections.get(item, 0) - self.last_detections.get(item, 0)) 
+                              for item in ITEMS if current_detections.get(item, 0) > self.last_detections.get(item, 0))
         reward += resource_reward
 
         # Kill proxy
-        kill_reward = 0.0
-        for enemy in ENEMIES:
-            delta = self.last_detections.get(enemy, 0) - current_detections.get(enemy, 0)
-            if delta > 0:
-                kill_reward += REWARD_WEIGHTS["kill_bonus"] * delta
+        kill_reward = sum(REWARD_WEIGHTS["kill_bonus"] * (self.last_detections.get(enemy, 0) - current_detections.get(enemy, 0)) 
+                          for enemy in ENEMIES if self.last_detections.get(enemy, 0) > current_detections.get(enemy, 0))
         reward += kill_reward
 
         # Health shaping
-        health_reward = 0.0
         health_delta = current_health - self.last_health_proxy
-        if health_delta > 0.08:
-            health_reward = REWARD_WEIGHTS["health_gain_bonus"]
-        elif health_delta < -0.08:
-            health_reward = REWARD_WEIGHTS["health_loss_penalty"]
+        health_reward = REWARD_WEIGHTS["health_gain_bonus"] if health_delta > 0.08 else (REWARD_WEIGHTS["health_loss_penalty"] if health_delta < -0.08 else 0.0)
         reward += health_reward
 
         # Enemy visible penalty
-        enemy_penalty = 0.0
-        for enemy in ENEMIES:
-            if enemy in current_detections:
-                enemy_penalty += REWARD_WEIGHTS["enemy_visible_penalty"]
-        reward += enemy_penalty
+        enemy_visible_reward = sum(REWARD_WEIGHTS["enemy_visible_penalty"] for enemy in ENEMIES if enemy in current_detections)
+        reward += enemy_visible_reward
+
+        # Action shaping - bonus for looking down (action 23)
+        if self.current_step > 0 and action == 23:
+            reward += 0.6
+
+        # Potential-based shaping
+        potential = current_health * 8.0 + len([k for k in current_detections if k in ITEMS]) * 3.0
+        if hasattr(self, 'last_potential'):
+            shaping = 0.99 * potential - self.last_potential
+            reward += shaping
+        self.last_potential = potential
 
         # Curiosity
         curiosity_reward = 0.0
@@ -253,6 +262,7 @@ class ValheimSimpleEnv(gym.Env):
         self.last_detections = Counter()
         self.last_health_proxy = 0.5
         self.last_potential = 0.0
+
         self._update_capture_region()
 
         pydirectinput.press('esc')
@@ -268,21 +278,8 @@ class ValheimSimpleEnv(gym.Env):
     def step(self, action):
         self.current_step += 1
 
-        action_map = {
-            0: ("w", 0.25), 1: ("s", 0.25), 2: ("a", 0.25), 3: ("d", 0.25),
-            4: ("space", 0.15), 5: ("left", 0.3), 6: ("right", 0.3),
-            7: ("e", 0.2), 8: ("shift", 0.15), 9: ("tab", 0.05),
-            10: ("x", 0.05),
-            11: ("1", 0.15), 12: ("2", 0.15), 13: ("3", 0.15), 14: ("4", 0.15),
-            15: ("5", 0.15), 16: ("6", 0.15), 17: ("7", 0.15), 18: ("8", 0.15),
-            19: (None, 0.1),
-            20: ("mouse_left", MOUSE_SENSITIVITY),
-            21: ("mouse_right", MOUSE_SENSITIVITY),
-            22: ("mouse_up", MOUSE_SENSITIVITY),
-            23: ("mouse_down", MOUSE_SENSITIVITY),
-        }
-
-        act = action_map.get(action, (None, 0.1))
+        # Use ACTION_MAP from global scope
+        act = ACTION_MAP.get(action, (None, 0.1))
         action_name = "unknown"
 
         if act[0] is not None:
@@ -330,14 +327,16 @@ class ValheimSimpleEnv(gym.Env):
         current_detections = self._get_detections(obs)
         current_health = self._health_proxy(obs)
 
+        # Detection logging every 30 steps
+        if self.current_step % 30 == 0:
+            resources = {k: v for k, v in current_detections.items() if k in ITEMS}
+            enemies_detected = {k: v for k, v in current_detections.items() if k in ENEMIES}
+            logger.info(f"Detections | Resources: {resources} | Enemies: {enemies_detected} | Health: {current_health:.2f}")
+
         reward = self._compute_reward(current_detections, current_health)
         self.episode_reward += reward
 
-        self.last_detections = current_detections
-        self.last_health_proxy = current_health
-        self.last_preprocessed = current_preprocessed
-
-        # === Detailed Reward Component Logging every 100 steps ===
+        # Detailed reward breakdown every 100 steps
         if self.current_step % 100 == 0:
             resource_reward = sum(REWARD_WEIGHTS["wood_bonus"] * (current_detections.get(item, 0) - self.last_detections.get(item, 0)) 
                                   for item in ITEMS if current_detections.get(item, 0) > self.last_detections.get(item, 0))
@@ -345,7 +344,6 @@ class ValheimSimpleEnv(gym.Env):
                               for enemy in ENEMIES if self.last_detections.get(enemy, 0) > current_detections.get(enemy, 0))
             health_delta = current_health - self.last_health_proxy
             health_reward = REWARD_WEIGHTS["health_gain_bonus"] if health_delta > 0.08 else (REWARD_WEIGHTS["health_loss_penalty"] if health_delta < -0.08 else 0.0)
-            
             enemy_visible_reward = sum(REWARD_WEIGHTS["enemy_visible_penalty"] for enemy in ENEMIES if enemy in current_detections)
             
             curiosity_reward = 0.0
@@ -361,6 +359,10 @@ class ValheimSimpleEnv(gym.Env):
                         f"EnemyVisible={enemy_visible_reward:.2f} | "
                         f"Curiosity={curiosity_reward:.2f} | "
                         f"Total={reward:.2f}")
+
+        self.last_detections = current_detections
+        self.last_health_proxy = current_health
+        self.last_preprocessed = current_preprocessed
 
         terminated = False
         truncated = self.current_step > 4000
