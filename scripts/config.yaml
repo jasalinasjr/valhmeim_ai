@@ -58,27 +58,35 @@ action_map:
 
 ## ------ Resources & Enemies ------
 items:
-  - wood
-  - raspberry
-  - stone
-  - flint
-  - resin
-  - leather scraps
-  - mushroom
-  - raw meat
-  - deer hide
-  - bone fragments
+  - Wood
+  - Raspberries
+  - Blueberries
+  - Stone
+  - Flint
+  - Resin
+  - Leather Scraps
+  - Mushroom
+  - Boar Meat
+  - Deer Meat
+  - Deer Hide
+  - Bone Fragments
+  - Neck Tail
+  - Feathers
+  - Honey
 
 enemies:
-  - greyling
-  - boar
-  - deer
-  - neck
-  - greydwarf
-  - troll
-  - wolf
-  - skeleton
-  - enemy
+  - Greyling
+  - Boar
+  - Deer
+  - Neck
+  - Greydwarf
+  - Greydwarf Brute
+  - Greydwarf Shaman
+  - Skeleton
+  - Rancid Remains
+  - Bear
+  - Troll
+  - Wolf
 
 ## ------ PPO Hyperparameters ------
 PPO_PARAMS:

@@ -1,0 +1,48 @@
+# Valheim YOLOv8 Dataset Configuration
+path: .                   # or absolute path to your dataset folder
+
+train: train/images
+val: valid/images
+test: test/images         # optional
+
+# Number of classes
+nc: 36
+
+# Class names (must match the order of your labels)
+names:
+  0: Branch
+  1: Wood
+  2: Stone
+  3: Raspberries
+  4: Resin
+  5: Greyling
+  6: Boar
+  7: Neck
+  8: Dandilion
+  9: Flint
+  10: Club
+  11: Stone Axe
+  12: Hammer
+  13: Dear Meat
+  14: Boar Meat
+  15: Greydwarf
+  16: Skeleton
+  17: Bear
+  18: Leather Scraps
+  19: Deer Hide
+  20: Beech Sapling
+  21: Beech Tree
+  22: Birch Tree
+  23: Oak Tree
+  24: Neck Tail
+  25: House
+  26: Crafting Bench
+  27: Fire
+  28: Torch
+  29: Cooking Station
+  30: Health Bar
+  31: Stamina Bar
+  32: Hotbar
+  33: Mini Map
+  34: Status Indicators
+  35: Food Indicators
