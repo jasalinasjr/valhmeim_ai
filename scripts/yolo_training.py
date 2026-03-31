@@ -1,20 +1,16 @@
 from ultralytics import YOLO
 
-model = YOLO("yolov8n.pt")        # or "yolov8s.pt"
+# Use YOLOv11 nano - best balance for your GPU
+model = YOLO("yolov11n.pt")
 
 results = model.train(
-    data="path/to/your_dataset/data.yaml",
-    epochs=80,                    # start with 50–100
-    imgsz=640,                    # 512 if VRAM is tight
-    batch=8,                      # 4–8 max on 970M
-    workers=2,                    # low to save RAM
-    device=0,                     # GPU
-    name="valheim_yolo_v1",
-    patience=15,                  # early stopping
+    data="valheim_dataset/data.yaml",
+    epochs=80,                    # 50-80 is good starting point
+    imgsz=640,
+    batch=8,                      # Safe for 6GB VRAM on 970M
+    device=0,
+    name="valheim_yolo_v11",
+    patience=15,                  # Early stopping
     pretrained=True,
-    optimizer="AdamW",
-    lr0=0.01,                     # learning rate
-    lrf=0.01,
-    momentum=0.937,
-    weight_decay=0.0005
+    optimizer="AdamW"
 )
