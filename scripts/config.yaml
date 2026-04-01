@@ -1,13 +1,13 @@
---- # Valheim AI Configuration
+--- # Valheim AI Configuration - Updated for YOLO11n + Optimized Rewards
 
 ## ------ General ------
 VALHEIM_WINDOW_TITLE: "Valheim"
 MODEL_SAVE: "valheim_ppo"
 YOLO_MODEL_PATH: "valheim_custom_v3.pt"
 DEVICE: "cuda"
-TEMP_THRESHOLD: 90
-VRAM_RESERVE: 450
-MAX_BURST_STEPS: 4000
+TEMP_THRESHOLD: 90          # Slightly lower for safety on 970M
+VRAM_RESERVE: 500
+MAX_BURST_STEPS: 3000       # Shorter bursts = safer on Colab/laptop
 MOUSE_SENSITIVITY: 56
 
 ## ------ Capture Region ------
@@ -17,17 +17,17 @@ capture_region:
   width: 1280
   height: 880
 
-## ------ Reward Weights (All configurable here) ------
+## ------ Reward Weights (Optimized) ------
 REWARD_WEIGHTS:
-  time_penalty: -0.01
-  wood_bonus: 2.0
-  kill_bonus: 8.0
-  health_gain_bonus: 4.0
-  health_loss_penalty: -3.0
-  enemy_visible_penalty: -1.5
-  curiosity_scale: 0.4
-  action_look_down_bonus: 0.6      # New: bonus for looking down
-  potential_scale: 1.0             # Multiplier for potential-based shaping
+  time_penalty: -0.012
+  wood_bonus: 3.5           # Higher because model struggles with wood
+  stone_bonus: 3.2
+  kill_bonus: 10.0
+  health_gain_bonus: 5.0
+  health_loss_penalty: -4.5
+  enemy_visible_penalty: -1.3
+  curiosity_scale: 0.32     # Slightly reduced to not overpower other signals
+  action_look_down_bonus: 0.8   # Stronger incentive for looking down
 
 ## ------ Actions ------
 action_map:
@@ -40,7 +40,7 @@ action_map:
   6: ["right", 0.3]
   7: ["e", 0.2]
   8: ["shift", 0.15]
-  9: ["tab", 0.05]
+  9: [null, 0.01]
   10: ["x", 0.05]
   11: ["1", 0.15]
   12: ["2", 0.15]
@@ -50,13 +50,13 @@ action_map:
   16: ["6", 0.15]
   17: ["7", 0.15]
   18: ["8", 0.15]
-  19: [null, 0.1]
+  19: [null, 0.01]
   20: ["mouse_left", "MOUSE_SENSITIVITY"]
   21: ["mouse_right", "MOUSE_SENSITIVITY"]
   22: ["mouse_up", "MOUSE_SENSITIVITY"]
   23: ["mouse_down", "MOUSE_SENSITIVITY"]
 
-## ------ Resources & Enemies ------
+## ------ Resources & Enemies (MUST match YOLO class names exactly) ------
 items:
   - Wood
   - Raspberries
