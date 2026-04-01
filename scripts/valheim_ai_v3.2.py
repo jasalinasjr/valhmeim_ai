@@ -29,7 +29,7 @@ def load_config():
 
     required = ["VALHEIM_WINDOW_TITLE", "MODEL_SAVE", "YOLO_MODEL_PATH", "DEVICE",
                 "TEMP_THRESHOLD", "VRAM_RESERVE", "MAX_BURST_STEPS", "MOUSE_SENSITIVITY",
-                "REWARD_WEIGHTS", "capture_region", "action_map", "items", "enemies"]
+                "REWARD_WEIGHTS", "capture_region", "action_map", "items", "enemies", "PPO_PARAMS"]
     for key in required:
         if key not in config:
             print(f"ERROR: Missing required key '{key}' in config.yaml")
@@ -51,6 +51,7 @@ CAPTURE_REGION = config["capture_region"]
 ACTION_MAP_RAW = config["action_map"]
 ITEMS = config["items"]
 ENEMIES = config["enemies"]
+PPO_PARAMS = config["PPO_PARAMS"]
 
 # Convert action_map
 ACTION_MAP = {}
@@ -190,16 +191,17 @@ class ValheimSimpleEnv(gym.Env):
 
     def _compute_reward(self, current_detections: Counter, current_health: float,
                        current_preprocessed: np.ndarray, action: int) -> float:
-        """Optimized reward with potential-based shaping."""
+        """Optimized reward function with potential-based shaping."""
         reward = REWARD_WEIGHTS.get("time_penalty", -0.01)
 
-        # Resource rewards
+        # Resource collection rewards
         resource_reward = 0.0
         for item in ITEMS:
             delta = current_detections.get(item, 0) - self.last_detections.get(item, 0)
             if delta > 0:
-                bonus = REWARD_WEIGHTS.get(f"{item}_bonus", 
-                                         3.0 if item in ["wood", "stone"] else 1.8)
+                # Use exact key from config (e.g. wood_bonus, stone_bonus)
+                bonus = REWARD_WEIGHTS.get(f"{item.lower()}_bonus", 
+                                         REWARD_WEIGHTS.get("wood_bonus", 3.0) if item.lower() in ["wood", "stone"] else 1.8)
                 resource_reward += bonus * delta
         reward += resource_reward
 
@@ -211,7 +213,7 @@ class ValheimSimpleEnv(gym.Env):
                 kill_reward += REWARD_WEIGHTS.get("kill_bonus", 10.0) * delta
         reward += kill_reward
 
-        # Health rewards
+        # Health delta
         health_delta = current_health - self.last_health_proxy
         if health_delta > 0.06:
             reward += REWARD_WEIGHTS.get("health_gain_bonus", 5.0)
@@ -220,19 +222,19 @@ class ValheimSimpleEnv(gym.Env):
 
         # Enemy visible penalty
         enemy_visible = sum(1 for e in ENEMIES if e in current_detections)
-        reward += enemy_visible * REWARD_WEIGHTS.get("enemy_visible_penalty", -1.2)
+        reward += enemy_visible * REWARD_WEIGHTS.get("enemy_visible_penalty", -1.3)
 
         # Look-down bonus
         if action == 23:
-            reward += 0.8
+            reward += REWARD_WEIGHTS.get("action_look_down_bonus", 0.8)
 
         # Potential-based shaping
         current_potential = (current_health * 8.0) + len([k for k in current_detections if k in ITEMS]) * 2.5
         shaping = 0.99 * current_potential - getattr(self, 'last_potential', current_potential)
-        reward += shaping
+        reward += shaping * REWARD_WEIGHTS.get("potential_scale", 1.0)
         self.last_potential = current_potential
 
-        # Curiosity
+        # Curiosity reward
         curiosity_reward = 0.0
         if self.last_preprocessed is not None:
             diff = np.abs(current_preprocessed.astype(np.float32) - self.last_preprocessed.astype(np.float32))
@@ -264,7 +266,7 @@ class ValheimSimpleEnv(gym.Env):
     def step(self, action):
         self.current_step += 1
 
-        # Action execution
+        # Execute action
         act = ACTION_MAP.get(action, (None, 0.1))
         action_name = "IDLE"
         if act[0] is not None:
@@ -295,7 +297,7 @@ class ValheimSimpleEnv(gym.Env):
         if self.current_step % 50 == 0:
             logger.info(f"Step {self.current_step:4d} | Action: {action} → {action_name}")
 
-        # Capture frame
+        # Capture and process frame
         obs = self._capture_screen()
         self.last_obs = obs
         processed = self._preprocess(obs)
@@ -307,16 +309,16 @@ class ValheimSimpleEnv(gym.Env):
         reward = self._compute_reward(current_detections, current_health, current_preprocessed, action)
         self.episode_reward += reward
 
-        # Regular logging
+        # Regular detections log
         if self.current_step % 30 == 0:
             resources = {k: v for k, v in current_detections.items() if k in ITEMS}
             enemies_d = {k: v for k, v in current_detections.items() if k in ENEMIES}
             logger.info(f"Detections | Resources: {resources} | Enemies: {enemies_d} | Health: {current_health:.2f}")
 
-        # Reward breakdown every 100 steps
+        # Detailed reward breakdown every 100 steps
         if self.current_step % 100 == 0:
             resource_r = sum(
-                (REWARD_WEIGHTS.get(f"{i}_bonus", 3.0 if i in ["wood", "stone"] else 1.8)) *
+                (REWARD_WEIGHTS.get(f"{i.lower()}_bonus", 3.0 if i.lower() in ["wood", "stone"] else 1.8)) *
                 max(0, current_detections.get(i, 0) - self.last_detections.get(i, 0))
                 for i in ITEMS
             )
@@ -336,7 +338,7 @@ class ValheimSimpleEnv(gym.Env):
 
             logger.info(f"Reward Breakdown @ {self.current_step}: Time={REWARD_WEIGHTS.get('time_penalty',-0.01):.2f} | "
                         f"Resources={resource_r:.2f} | Kills={kill_r:.2f} | Health={health_r:.2f} | "
-                        f"EnemyVis={-1.2 * sum(1 for e in ENEMIES if e in current_detections):.2f} | "
+                        f"EnemyVis={-1.3*sum(1 for e in ENEMIES if e in current_detections):.2f} | "
                         f"Curiosity={curiosity_r:.2f} | Total={reward:.2f}")
 
             # Debug screenshot
@@ -356,7 +358,7 @@ class ValheimSimpleEnv(gym.Env):
         self.last_preprocessed = current_preprocessed
 
         terminated = False
-        truncated = self.current_step > 8000   # Increased for better training
+        truncated = self.current_step > 8000
 
         return processed, reward, terminated, truncated, {"episode_reward": self.episode_reward}
 
@@ -365,7 +367,7 @@ class ValheimSimpleEnv(gym.Env):
             self.sct.close()
         cv2.destroyAllWindows()
 
-# ========================= MAIN =========================
+# ========================= MAIN TRAINING LOOP =========================
 def main():
     running = True
     def shutdown(sig, frame):
@@ -393,12 +395,10 @@ def main():
             model_path = f"{MODEL_SAVE}.zip"
             if os.path.exists(model_path):
                 logger.info(f"Loading existing model: {MODEL_SAVE}")
-                model = PPO.load(model_path, env=vec_env, device=DEVICE)
+                model = PPO.load(model_path, env=vec_env, device=DEVICE, **PPO_PARAMS)
             else:
                 logger.info("Creating new PPO model")
-                model = PPO("CnnPolicy", vec_env, device=DEVICE,
-                            learning_rate=3e-4, n_steps=1024, batch_size=64,
-                            n_epochs=10, ent_coef=0.01, tensorboard_log="./valheim_ppo_logs/")
+                model = PPO(env=vec_env, device=DEVICE, **PPO_PARAMS)
 
             logger.info(f"Starting burst of {MAX_BURST_STEPS} steps")
             model.learn(total_timesteps=MAX_BURST_STEPS, progress_bar=True)
